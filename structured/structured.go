@@ -7,16 +7,16 @@ import (
 
 // Schema represents a JSON schema for structured output.
 type Schema struct {
-	Type       string                 `json:"type"`
-	Properties map[string]Property    `json:"properties"`
-	Required   []string               `json:"required,omitempty"`
+	Type       string              `json:"type"`
+	Properties map[string]Property `json:"properties"`
+	Required   []string            `json:"required,omitempty"`
 }
 
 // Property represents a property in a schema.
 type Property struct {
-	Type        string      `json:"type"`
-	Description string      `json:"description,omitempty"`
-	Enum        []string    `json:"enum,omitempty"`
+	Type        string              `json:"type"`
+	Description string              `json:"description,omitempty"`
+	Enum        []string            `json:"enum,omitempty"`
 	Properties  map[string]Property `json:"properties,omitempty"`
 }
 

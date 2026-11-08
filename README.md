@@ -27,8 +27,19 @@
 | `/help` | Показать справку |
 | `/clear` | Новая беседа |
 | `/exit` | Выйти |
-| `/stream` | Режим потоковой генерации |
+| `/stream` | Режим потоковой генерации (с поддержкой tools) |
 | `/vision <path> <question>` | Анализ изображения |
+| `/usage` | Расход токенов за сессию |
+| `/schema <file> <prompt>` | Генерация JSON по схеме с валидацией |
+| `/remember <text>` | Сохранить в долговременную память |
+| `/memories` | Список долговременных памятей |
+| `/forget` | Удалить все памяти |
+| `/conversations` | Список разговоров |
+| `/switch <id>` | Переключиться на разговор (контекст восстанавливается) |
+| `/plan <task>` | Декомпозиция задачи и пошаговое выполнение |
+| `/team <task>` | Multi-agent pipeline: planner → executor → critic |
+| `/export <id> [md|json]` | Экспорт разговора в файл |
+| `/serve` | Запуск HTTP API сервера |
 
 ## Требования
 
@@ -105,9 +116,74 @@ go run ./cmd/agent
 Агент поддерживает следующие инструменты:
 
 - **echo** — возвращает отправленное сообщение
-- **calc** — вычисляет математические выражения
+- **calc** — вычисляет выражения: скобки, унарный минус, `^` (степень)
 - **time** — возвращает текущую дату и время
-- **weather** — показывает погоду для указанного города (моковые данные)
+- **weather** — реальная погода через [Open-Meteo](https://open-meteo.com/) (без ключа), кеш 10 минут
+- **filesystem** — операции с файлами в sandbox-директории (read/write/list/…)
+- **process** — выполнение внешних команд из whitelist
+- **web_search** — поиск через DuckDuckGo
+- **code_interpreter** — выполнение Go кода в изолированной временной директории
+
+### Безопасность инструментов
+
+Секция `tools` в `config.yaml`:
+
+```yaml
+tools:
+  root: ""                    # sandbox-директория для filesystem (пусто = текущая директория)
+  allowed_commands:           # whitelist для process (пустой список = запрет всего)
+    - go
+    - git
+    - python
+  confirm: ask                # ask (спрашивать y/N) | always (разрешать) | never (запрещать)
+  max_result_size: 20000      # обрезка результатов инструментов (символы)
+```
+
+Опасные операции (`write`, `delete`, `move` в filesystem; `exec`, `kill` в process) при режиме
+`ask` требуют подтверждения: `Approve? [y/N]`. Env-переменные: `AGENT_TOOLS_ROOT`,
+`AGENT_TOOLS_CONFIRM`, `AGENT_TOOLS_MAX_RESULT`.
+
+### Контекст и долговременная память
+
+Секция `agent` дополнительно поддерживает:
+
+```yaml
+agent:
+  context_tokens: 8000   # примерный бюджет токенов для истории сессии
+  summarize: false       # LLM-суммаризация старых сообщений при превышении бюджета
+  memory: false          # долговременная память (Embeddings API + SQLite)
+```
+
+Env-переменные: `AGENT_CONTEXT_TOKENS`, `AGENT_SUMMARIZE`, `AGENT_MEMORY` (`1`/`true`/`yes`).
+При включённой памяти релевантные факты автоматически подставляются в системный промпт.
+
+### Плагины (внешние инструменты)
+
+Секция `tools.plugins` — список внешних команд, реализующих subprocess-протокол:
+
+```yaml
+tools:
+  plugins:
+    - path/to/my-plugin.exe
+    - my-plugin.sh
+```
+
+Протокол плагина:
+- `my-plugin --describe` → JSON-манифест: `{"name", "description", "parameters"}`
+- Запрос на stdin: `{"args": {...}}` → ответ на stdout: `{"result": "...", "error": ""}`
+
+Имена плагинов не могут перезаписывать встроенные инструменты.
+
+### HTTP API Server
+
+Команда `/serve` запускает HTTP API (порт `server.port`, по умолчанию 8080):
+
+| Endpoint | Описание |
+|----------|----------|
+| `POST /v1/chat` | `{"message": "...", "session_id": "..."}` → `{"response", "usage"}` |
+| `POST /v1/chat/stream` | То же, но SSE-стриминг (`delta`/`done`/`error` события) |
+| `GET /v1/usage` | Расход токенов сессии |
+| `GET /healthz` | Проверка живости |
 
 ## Архитектура
 

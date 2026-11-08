@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -16,25 +17,44 @@ type Message struct {
 	Content string
 }
 
-// Store manages conversation history persistence.
-type Store struct {
-	db *sql.DB
+// Conversation represents a conversation with metadata.
+type Conversation struct {
+	ID           int64
+	Name         string
+	CreatedAt    time.Time
+	MessageCount int
 }
 
-// New creates a new history store.
+// Store manages conversation history persistence.
+type Store struct {
+	db          *sql.DB
+	currentConv int64
+}
+
+// New creates a new history store using the default config directory.
 func New() (*Store, error) {
-	dir := ConfigDir()
+	return NewWithPath("")
+}
+
+// NewWithPath creates a new history store with an explicit database path.
+// If path is empty, uses the default config directory.
+func NewWithPath(path string) (*Store, error) {
+	dbPath := path
+	if dbPath == "" {
+		dbPath = DefaultDBPath()
+	}
+
+	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create history dir: %w", err)
 	}
 
-	dbPath := filepath.Join(dir, "history.db")
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	store := &Store{db: db}
+	store := &Store{db: db, currentConv: 0}
 	if err := store.initDB(); err != nil {
 		return nil, err
 	}
@@ -42,11 +62,18 @@ func New() (*Store, error) {
 	return store, nil
 }
 
-// initDB creates the required tables.
+// DefaultDBPath returns the default database path in the user's home directory.
+func DefaultDBPath() string {
+	dir := ConfigDir()
+	return filepath.Join(dir, "history.db")
+}
+
+// initDB creates the required tables and runs migrations.
 func (s *Store) initDB() error {
 	query := `
 	CREATE TABLE IF NOT EXISTS conversations (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		message_count INTEGER DEFAULT 0
 	);
@@ -58,23 +85,53 @@ func (s *Store) initDB() error {
 		content TEXT NOT NULL,
 		name TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
 	`
 
 	_, err := s.db.Exec(query)
-	return err
+	if err != nil {
+		return fmt.Errorf("create tables: %w", err)
+	}
+
+	// Migration: add name column if it doesn't exist
+	_, err = s.db.Exec("ALTER TABLE conversations ADD COLUMN name TEXT DEFAULT ''")
+	if err != nil {
+		// Column already exists or other error, ignore
+	}
+
+	// Long-term memory table
+	if err := s.initMemoryDB(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // NewConversation creates a new conversation and returns its ID.
 func (s *Store) NewConversation() (int64, error) {
-	res, err := s.db.Exec("INSERT INTO conversations (message_count) VALUES (0)")
+	res, err := s.db.Exec(
+		"INSERT INTO conversations (name, message_count) VALUES (?, 0)",
+		"",
+	)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, _ := res.LastInsertId()
+	s.currentConv = id
+	return id, nil
+}
+
+// SetCurrentConversation sets the active conversation ID.
+func (s *Store) SetCurrentConversation(id int64) {
+	s.currentConv = id
+}
+
+// CurrentConversation returns the active conversation ID.
+func (s *Store) CurrentConversation() int64 {
+	return s.currentConv
 }
 
 // SaveMessage saves a message to the current conversation.
@@ -95,7 +152,7 @@ func (s *Store) SaveMessage(convID int64, msg Message) error {
 // GetMessages retrieves messages for a conversation.
 func (s *Store) GetMessages(convID int64, limit int) ([]Message, error) {
 	rows, err := s.db.Query(
-		"SELECT role, content, name FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+		"SELECT role, content, name FROM messages WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
 		convID, limit,
 	)
 	if err != nil {
@@ -112,6 +169,78 @@ func (s *Store) GetMessages(convID int64, limit int) ([]Message, error) {
 		messages = append(messages, msg)
 	}
 	return messages, nil
+}
+
+// ListConversations returns all conversations ordered by creation date (newest first).
+func (s *Store) ListConversations() ([]Conversation, error) {
+	rows, err := s.db.Query(
+		"SELECT id, COALESCE(name, ''), created_at, message_count FROM conversations ORDER BY created_at DESC",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var conversations []Conversation
+	for rows.Next() {
+		var c Conversation
+		var createdAt string
+		if err := rows.Scan(&c.ID, &c.Name, &createdAt, &c.MessageCount); err != nil {
+			return nil, err
+		}
+		c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		if c.CreatedAt.IsZero() {
+			c.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		}
+		conversations = append(conversations, c)
+	}
+	return conversations, nil
+}
+
+// GetConversation returns a single conversation by ID.
+func (s *Store) GetConversation(id int64) (*Conversation, error) {
+	var c Conversation
+	var createdAt string
+	err := s.db.QueryRow(
+		"SELECT id, COALESCE(name, ''), created_at, message_count FROM conversations WHERE id = ?",
+		id,
+	).Scan(&c.ID, &c.Name, &createdAt, &c.MessageCount)
+	if err != nil {
+		return nil, err
+	}
+	c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	if c.CreatedAt.IsZero() {
+		c.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	}
+	return &c, nil
+}
+
+// RenameConversation renames a conversation.
+func (s *Store) RenameConversation(id int64, name string) error {
+	_, err := s.db.Exec("UPDATE conversations SET name = ? WHERE id = ?", name, id)
+	return err
+}
+
+// DeleteConversation deletes a conversation and all its messages.
+func (s *Store) DeleteConversation(id int64) error {
+	_, err := s.db.Exec("DELETE FROM conversations WHERE id = ?", id)
+	return err
+}
+
+// DeleteAllConversations deletes all conversations and their messages.
+func (s *Store) DeleteAllConversations() error {
+	_, err := s.db.Exec("DELETE FROM messages")
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("DELETE FROM conversations")
+	if err != nil {
+		return err
+	}
+	// Reset autoincrement
+	s.db.Exec("DELETE FROM sqlite_sequence WHERE name='conversations'")
+	s.db.Exec("DELETE FROM sqlite_sequence WHERE name='messages'")
+	return nil
 }
 
 // Close closes the database connection.

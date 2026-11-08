@@ -69,9 +69,9 @@ func (t *WebSearchTool) Execute(argsJSON string) (string, error) {
 	}
 
 	resultJSON, _ := json.Marshal(map[string]interface{}{
-		"query":    args.Query,
-		"results":  results,
-		"count":    len(results),
+		"query":   args.Query,
+		"results": results,
+		"count":   len(results),
 	})
 
 	return string(resultJSON), nil

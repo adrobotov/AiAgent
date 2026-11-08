@@ -158,7 +158,7 @@ func (r *Renderer) renderInline(text string) string {
 }
 
 var (
-	boldRegex     = regexp.MustCompile(`\*\*[^*]+\*\*`)
-	codeRegex     = regexp.MustCompile("`[^`]+`")
-	orderedList   = regexp.MustCompile(`^\d+\.\s`)
+	boldRegex   = regexp.MustCompile(`\*\*[^*]+\*\*`)
+	codeRegex   = regexp.MustCompile("`[^`]+`")
+	orderedList = regexp.MustCompile(`^\d+\.\s`)
 )

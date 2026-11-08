@@ -21,6 +21,13 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// Usage holds token usage statistics from the API response.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 // FunctionCall represents a function call from GigaChat.
 type FunctionCall struct {
 	Name      string      `json:"name"`
@@ -31,12 +38,14 @@ type FunctionCall struct {
 type Response struct {
 	Content      string
 	FunctionCall *FunctionCall
+	Usage        *Usage
 }
 
 // StreamChunk represents a chunk from streaming response.
 type StreamChunk struct {
 	Content      string
 	FunctionCall *FunctionCall
+	Usage        *Usage
 	IsComplete   bool
 }
 
@@ -100,7 +109,9 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -122,11 +133,12 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	var apiResp struct {
 		Choices []struct {
 			Message struct {
-				Content      string      `json:"content"`
-				Role         string      `json:"role"`
+				Content      string        `json:"content"`
+				Role         string        `json:"role"`
 				FunctionCall *FunctionCall `json:"function_call"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage *Usage `json:"usage"`
 	}
 
 	if err := json.Unmarshal(body, &apiResp); err != nil {
@@ -139,6 +151,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 
 	result := &Response{
 		Content: apiResp.Choices[0].Message.Content,
+		Usage:   apiResp.Usage,
 	}
 
 	if apiResp.Choices[0].Message.FunctionCall != nil {
@@ -146,6 +159,61 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	}
 
 	return result, nil
+}
+
+// Embed returns the embedding vector for the text using the embeddings API.
+// The returned vector uses float32 precision.
+func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+	token, err := c.getAuthToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("auth error: %w", err)
+	}
+
+	reqBody := map[string]interface{}{
+		"model": "embeddings",
+		"input": text,
+	}
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/embeddings", bytes.NewReader(reqJSON))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("embeddings API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var parsed struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if len(parsed.Data) == 0 {
+		return nil, fmt.Errorf("empty embeddings response")
+	}
+	return parsed.Data[0].Embedding, nil
 }
 
 // Stream sends a message to GigaChat and returns a channel of streaming chunks.
@@ -179,7 +247,9 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Connection", "keep-alive")
 
@@ -197,7 +267,6 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-		var fullContent strings.Builder
 		var fullFuncCall *FunctionCall
 
 		for scanner.Scan() {
@@ -217,24 +286,27 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 
 			// End of stream
 			if data == "[DONE]" {
-				ch <- StreamChunk{
-					Content:    fullContent.String(),
-					IsComplete: true,
-				}
-				return
+				break
 			}
 
 			// Parse chunk
 			var chunk struct {
 				Choices []struct {
 					Delta struct {
-						Content      string      `json:"content"`
+						Content      string        `json:"content"`
 						FunctionCall *FunctionCall `json:"function_call"`
 					} `json:"delta"`
 				} `json:"choices"`
+				Usage *Usage `json:"usage"`
 			}
 
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+
+			// Usage may arrive in a separate final SSE chunk without choices.
+			if chunk.Usage != nil && len(chunk.Choices) == 0 {
+				ch <- StreamChunk{Usage: chunk.Usage, IsComplete: false}
 				continue
 			}
 
@@ -245,7 +317,6 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 			delta := chunk.Choices[0].Delta
 
 			if delta.Content != "" {
-				fullContent.WriteString(delta.Content)
 				ch <- StreamChunk{
 					Content:    delta.Content,
 					IsComplete: false,
@@ -253,15 +324,20 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 			}
 
 			if delta.FunctionCall != nil {
-				fullFuncCall = delta.FunctionCall
+				fullFuncCall = mergeFunctionCalls(fullFuncCall, delta.FunctionCall)
 			}
 		}
 
-		// If we have a function call but no content, send it
-		if fullFuncCall != nil && fullContent.Len() == 0 {
+		// Send the final chunk. Function calls arrive in fragments across
+		// deltas, so the accumulated call is delivered once, at the end.
+		if fullFuncCall != nil {
 			ch <- StreamChunk{
 				FunctionCall: fullFuncCall,
 				IsComplete:   true,
+			}
+		} else {
+			ch <- StreamChunk{
+				IsComplete: true,
 			}
 		}
 	}()
@@ -269,10 +345,40 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 	return ch, nil
 }
 
+// mergeFunctionCalls merges a function call delta into the accumulated call.
+// Some APIs stream arguments as accumulated JSON, others as fragments —
+// both cases are handled.
+func mergeFunctionCalls(acc *FunctionCall, delta *FunctionCall) *FunctionCall {
+	if acc == nil {
+		return &FunctionCall{Name: delta.Name, Arguments: delta.Arguments}
+	}
+	if delta.Name != "" {
+		acc.Name = delta.Name
+	}
+
+	os, ook := acc.Arguments.(string)
+	ns, nok := delta.Arguments.(string)
+	if ook && nok && ns != "" {
+		// If the new fragment is valid JSON on its own, the API is sending
+		// accumulated arguments — replace. Otherwise treat as a fragment.
+		var tmp map[string]interface{}
+		if json.Unmarshal([]byte(ns), &tmp) == nil {
+			acc.Arguments = ns
+		} else {
+			acc.Arguments = os + ns
+		}
+	} else if delta.Arguments != nil {
+		acc.Arguments = delta.Arguments
+	}
+	return acc
+}
+
 // getAuthToken returns a valid access token for GigaChat.
 func (c *Client) getAuthToken(ctx context.Context) (string, error) {
 	if c.tokenManager == nil {
-		return "", fmt.Errorf("auth key not configured")
+		// No auth key configured — proceed without a token. This is useful
+		// for tests and self-hosted endpoints without authentication.
+		return "", nil
 	}
 
 	return c.tokenManager.GetToken(ctx)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,20 +20,82 @@ type Tool interface {
 	Execute(argsJSON string) (string, error)
 }
 
+// ConfirmFunc asks the user (or a policy) to approve a dangerous operation.
+// It returns true when the operation is approved.
+type ConfirmFunc func(toolName, action, detail string) bool
+
+// ConfirmationMode defines how dangerous operations are handled.
+type ConfirmationMode string
+
+const (
+	// ConfirmAsk prompts the user before dangerous operations (default).
+	ConfirmAsk ConfirmationMode = "ask"
+	// ConfirmAlways allows dangerous operations without asking.
+	ConfirmAlways ConfirmationMode = "always"
+	// ConfirmNever denies all dangerous operations.
+	ConfirmNever ConfirmationMode = "never"
+)
+
+// Policy decides whether a dangerous operation is allowed.
+type Policy struct {
+	Mode ConfirmationMode
+	Ask  ConfirmFunc // used when Mode == ConfirmAsk
+}
+
+// approve returns true when the operation is allowed.
+func (p Policy) approve(toolName, action, detail string) bool {
+	switch p.Mode {
+	case ConfirmAlways:
+		return true
+	case ConfirmNever:
+		return false
+	default: // ConfirmAsk
+		if p.Ask == nil {
+			// No approver available (e.g. non-interactive use) — deny.
+			return false
+		}
+		return p.Ask(toolName, action, detail)
+	}
+}
+
+// Confirmable is implemented by tools that support operation confirmation.
+type Confirmable interface {
+	SetPolicy(p Policy)
+}
+
+// DefaultMaxResultSize is the default limit for tool result size (chars).
+const DefaultMaxResultSize = 20000
+
 // Manager manages registered tools.
 type Manager struct {
-	tools map[string]Tool
+	tools         map[string]Tool
+	maxResultSize int
 }
 
 // NewManager creates a new ToolManager with built-in tools.
-func NewManager() *Manager {
+// root restricts the filesystem tool (empty = current working directory),
+// allowedCommands is the process tool whitelist (nil = default safe list),
+// maxResultSize limits tool result size (0 = DefaultMaxResultSize).
+func NewManager(root string, allowedCommands []string, maxResultSize int) *Manager {
+	if root == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
+	}
+	if maxResultSize <= 0 {
+		maxResultSize = DefaultMaxResultSize
+	}
+
 	m := &Manager{
-		tools: make(map[string]Tool),
+		tools:         make(map[string]Tool),
+		maxResultSize: maxResultSize,
 	}
 	m.Register(&EchoTool{})
 	m.Register(&CalcTool{})
 	m.Register(&TimeTool{})
 	m.Register(&WeatherTool{})
+	m.Register(NewFileSystemTool(root))
+	m.Register(NewProcessTool(30*time.Second, allowedCommands))
 	m.Register(NewWebSearchTool())
 	m.Register(NewCodeInterpreterTool())
 	return m
@@ -43,13 +106,39 @@ func (m *Manager) Register(t Tool) {
 	m.tools[t.Name()] = t
 }
 
+// SetPolicy applies the confirmation policy to all tools that support it.
+func (m *Manager) SetPolicy(p Policy) {
+	for _, t := range m.tools {
+		if c, ok := t.(Confirmable); ok {
+			c.SetPolicy(p)
+		}
+	}
+}
+
 // Execute runs a tool by name with JSON arguments.
+// Oversized results are truncated to maxResultSize characters.
 func (m *Manager) Execute(name, argsJSON string) (string, error) {
 	t, ok := m.tools[name]
 	if !ok {
 		return "", fmt.Errorf("tool not found: %s", name)
 	}
-	return t.Execute(argsJSON)
+	result, err := t.Execute(argsJSON)
+	if err != nil {
+		return "", err
+	}
+	return truncateResult(result, m.maxResultSize), nil
+}
+
+// truncateResult cuts a tool result at max characters, on a rune boundary.
+func truncateResult(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "\n... [output truncated]"
 }
 
 // ToFunctionDefinitions converts registered tools to GigaChat function definitions.
@@ -95,7 +184,7 @@ type CalcTool struct{}
 
 func (t *CalcTool) Name() string { return "calc" }
 func (t *CalcTool) Description() string {
-	return "Calculates a mathematical expression."
+	return "Calculates a mathematical expression. Supports +, -, *, /, ^ (power), parentheses and unary minus."
 }
 func (t *CalcTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
@@ -187,35 +276,8 @@ func GetCurrentTime() (string, error) {
 	return time.Now().Format("2006-01-02 15:04:05 MST"), nil
 }
 
-// FetchWeather returns mock weather data.
-func FetchWeather(argsJSON string) (string, error) {
-	var args struct {
-		Location string `json:"location"`
-	}
-	if err := parseArgs(argsJSON, &args); err != nil {
-		return "", err
-	}
-
-	// Mock weather data
-	weather := map[string]struct {
-		Temp    string
-		Condition string
-	}{
-		"москва":   {Temp: "+5°C", Condition: "Облачно"},
-		"moscow":   {Temp: "+5°C", Condition: "Облачно"},
-		"new york": {Temp: "+15°C", Condition: "Солнечно"},
-		"london":   {Temp: "+10°C", Condition: "Дождь"},
-		"tokyo":    {Temp: "+20°C", Condition: "Ясно"},
-	}
-
-	loc := strings.ToLower(args.Location)
-	if w, ok := weather[loc]; ok {
-		return fmt.Sprintf("Погода в %s: %s, %s", args.Location, w.Temp, w.Condition), nil
-	}
-
-	// Generate mock data for unknown locations
-	return fmt.Sprintf("Погода в %s: +12°C, Переменная облачность (моковые данные)", args.Location), nil
-}
+// FetchWeather returns current weather data (moved to weather.go).
+// The mock fallback implementation lives in weather.go.
 
 // parseArgs parses JSON arguments into the target struct.
 func parseArgs(argsJSON string, target interface{}) error {
@@ -228,101 +290,203 @@ func parseArgs(argsJSON string, target interface{}) error {
 	return json.Unmarshal([]byte(argsJSON), target)
 }
 
-// evaluateExpression evaluates a simple math expression.
-func evaluateExpression(expr string) (float64, error) {
-	expr = strings.TrimSpace(expr)
+// expression parser implements the following grammar:
+//
+//	expr   := term (('+' | '-') term)*
+//	term   := unary (('*' | '/') unary)*
+//	unary  := ('-' | '+') unary | power
+//	power  := primary ('^' unary)?        (right-associative)
+//	primary:= number | '(' expr ')'
 
-	type token struct {
-		value float64
-		op    rune
-	}
+type mathToken struct {
+	kind  string // "num", "op", "lparen", "rparen"
+	value float64
+	op    string
+}
 
-	var tokens []token
-	var numBuf strings.Builder
-
-	for i := 0; i < len(expr); i++ {
-		c := expr[i]
-
-		if c >= '0' && c <= '9' || c == '.' {
-			numBuf.WriteByte(c)
-		} else if c == '+' || c == '-' || c == '*' || c == '/' {
-			if numBuf.Len() > 0 {
-				val, err := strconv.ParseFloat(numBuf.String(), 64)
-				if err != nil {
-					return 0, fmt.Errorf("invalid number: %s", numBuf.String())
-				}
-				tokens = append(tokens, token{value: val})
-				numBuf.Reset()
-			}
-			tokens = append(tokens, token{op: rune(c)})
-		}
-	}
-
-	if numBuf.Len() > 0 {
-		val, err := strconv.ParseFloat(numBuf.String(), 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid number: %s", numBuf.String())
-		}
-		tokens = append(tokens, token{value: val})
-	}
-
-	if len(tokens) == 0 {
-		return 0, fmt.Errorf("empty expression")
-	}
-
-	// First pass: handle * and /
-	var result []token
+// tokenizeExpr splits the expression into tokens.
+func tokenizeExpr(expr string) ([]mathToken, error) {
+	var tokens []mathToken
 	i := 0
-	for i < len(tokens) {
-		t := tokens[i]
-		if t.op == '*' || t.op == '/' {
-			if len(result) == 0 || result[len(result)-1].op != 0 {
-				return 0, fmt.Errorf("invalid expression")
-			}
-			prev := result[len(result)-1].value
-			result = result[:len(result)-1]
-
+	for i < len(expr) {
+		c := expr[i]
+		switch {
+		case c == ' ' || c == '\t':
 			i++
-			if i >= len(tokens) || tokens[i].op != 0 {
-				return 0, fmt.Errorf("invalid expression")
+		case c >= '0' && c <= '9' || c == '.':
+			j := i
+			for j < len(expr) && (expr[j] >= '0' && expr[j] <= '9' || expr[j] == '.') {
+				j++
 			}
-			nextVal := tokens[i].value
-
-			var val float64
-			if t.op == '*' {
-				val = prev * nextVal
-			} else {
-				if nextVal == 0 {
-					return 0, fmt.Errorf("division by zero")
-				}
-				val = prev / nextVal
+			val, err := strconv.ParseFloat(expr[i:j], 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid number: %s", expr[i:j])
 			}
-			result = append(result, token{value: val})
-		} else {
-			result = append(result, t)
-		}
-		i++
-	}
-
-	// Second pass: handle + and -
-	if len(result) == 0 {
-		return 0, fmt.Errorf("invalid expression")
-	}
-
-	final := result[0].value
-	for i := 1; i+1 < len(result); i += 2 {
-		op := result[i].op
-		next := result[i+1].value
-
-		switch op {
-		case '+':
-			final += next
-		case '-':
-			final -= next
+			tokens = append(tokens, mathToken{kind: "num", value: val})
+			i = j
+		case strings.ContainsRune("+-*/^", rune(c)):
+			tokens = append(tokens, mathToken{kind: "op", op: string(c)})
+			i++
+		case c == '(':
+			tokens = append(tokens, mathToken{kind: "lparen"})
+			i++
+		case c == ')':
+			tokens = append(tokens, mathToken{kind: "rparen"})
+			i++
 		default:
-			return 0, fmt.Errorf("unknown operator: %c", op)
+			return nil, fmt.Errorf("unexpected character: %q", string(c))
 		}
 	}
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("empty expression")
+	}
+	return tokens, nil
+}
 
-	return math.Round(final*10000) / 10000, nil
+// mathParser is a recursive descent parser over the token list.
+type mathParser struct {
+	tokens []mathToken
+	pos    int
+}
+
+func (p *mathParser) peek() *mathToken {
+	if p.pos >= len(p.tokens) {
+		return nil
+	}
+	return &p.tokens[p.pos]
+}
+
+func (p *mathParser) next() *mathToken {
+	t := p.peek()
+	if t != nil {
+		p.pos++
+	}
+	return t
+}
+
+// evaluateExpression evaluates a math expression with parentheses, unary
+// minus and power operator.
+func evaluateExpression(expr string) (float64, error) {
+	tokens, err := tokenizeExpr(strings.TrimSpace(expr))
+	if err != nil {
+		return 0, err
+	}
+	p := &mathParser{tokens: tokens}
+	val, err := p.parseExpr()
+	if err != nil {
+		return 0, err
+	}
+	if p.peek() != nil {
+		return 0, fmt.Errorf("unexpected token at position %d", p.pos)
+	}
+	return math.Round(val*10000) / 10000, nil
+}
+
+// parseExpr := term (('+' | '-') term)*
+func (p *mathParser) parseExpr() (float64, error) {
+	left, err := p.parseTerm()
+	if err != nil {
+		return 0, err
+	}
+	for {
+		t := p.peek()
+		if t == nil || t.kind != "op" || (t.op != "+" && t.op != "-") {
+			return left, nil
+		}
+		p.next()
+		right, err := p.parseTerm()
+		if err != nil {
+			return 0, err
+		}
+		if t.op == "+" {
+			left += right
+		} else {
+			left -= right
+		}
+	}
+}
+
+// parseTerm := unary (('*' | '/') unary)*
+func (p *mathParser) parseTerm() (float64, error) {
+	left, err := p.parseUnary()
+	if err != nil {
+		return 0, err
+	}
+	for {
+		t := p.peek()
+		if t == nil || t.kind != "op" || (t.op != "*" && t.op != "/") {
+			return left, nil
+		}
+		p.next()
+		right, err := p.parseUnary()
+		if err != nil {
+			return 0, err
+		}
+		if t.op == "*" {
+			left *= right
+		} else {
+			if right == 0 {
+				return 0, fmt.Errorf("division by zero")
+			}
+			left /= right
+		}
+	}
+}
+
+// parseUnary := ('-' | '+') unary | power
+func (p *mathParser) parseUnary() (float64, error) {
+	t := p.peek()
+	if t != nil && t.kind == "op" && (t.op == "-" || t.op == "+") {
+		p.next()
+		val, err := p.parseUnary()
+		if err != nil {
+			return 0, err
+		}
+		if t.op == "-" {
+			return -val, nil
+		}
+		return val, nil
+	}
+	return p.parsePower()
+}
+
+// parsePower := primary ('^' unary)?   (right-associative)
+func (p *mathParser) parsePower() (float64, error) {
+	base, err := p.parsePrimary()
+	if err != nil {
+		return 0, err
+	}
+	t := p.peek()
+	if t != nil && t.kind == "op" && t.op == "^" {
+		p.next()
+		exp, err := p.parseUnary() // right-associative: 2^3^2 = 2^(3^2)
+		if err != nil {
+			return 0, err
+		}
+		return math.Pow(base, exp), nil
+	}
+	return base, nil
+}
+
+// parsePrimary := number | '(' expr ')'
+func (p *mathParser) parsePrimary() (float64, error) {
+	t := p.next()
+	if t == nil {
+		return 0, fmt.Errorf("unexpected end of expression")
+	}
+	switch t.kind {
+	case "num":
+		return t.value, nil
+	case "lparen":
+		val, err := p.parseExpr()
+		if err != nil {
+			return 0, err
+		}
+		if closing := p.next(); closing == nil || closing.kind != "rparen" {
+			return 0, fmt.Errorf("missing closing parenthesis")
+		}
+		return val, nil
+	default:
+		return 0, fmt.Errorf("unexpected token %q", t.op)
+	}
 }

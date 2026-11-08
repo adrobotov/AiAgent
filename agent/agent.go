@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"agent/config"
+	"agent/history"
 	"agent/llm"
 	"agent/markdown"
 	"agent/tools"
@@ -20,79 +23,107 @@ type Agent struct {
 	tools      *tools.Manager
 	history    []llm.Message
 	maxTurns   int
+	maxHistory int
 	renderer   *markdown.Renderer
 	retryCount int
 	retryDelay time.Duration
+
+	// Context management
+	contextTokens int  // approx. token budget for session history
+	summarize     bool // LLM-summarize old messages when over budget
+
+	// Long-term memory (optional)
+	memory *history.Store
+
+	// Token usage tracking
+	usageMu sync.Mutex
+	usage   llm.Usage
 }
 
 // New creates a new Agent instance.
 func New(cfg *config.Config) (*Agent, error) {
-	client := llm.NewClient(&cfg.LLM)
-	toolManager := tools.NewManager()
+	maxTurns := cfg.Agent.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 10
+	}
+	maxHistory := cfg.Agent.MaxHistoryMessages
+	if maxHistory <= 0 {
+		maxHistory = 20
+	}
+	contextTokens := cfg.Agent.ContextTokens
+	if contextTokens <= 0 {
+		contextTokens = 8000
+	}
+
+	toolManager := tools.NewManager(cfg.Tools.Root, cfg.Tools.AllowedCommands, cfg.Tools.MaxResultSize)
+	if len(cfg.Tools.Plugins) > 0 {
+		toolManager.RegisterPlugins(cfg.Tools.Plugins, func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, "⚠️  "+format+"\n", args...)
+		})
+	}
 
 	return &Agent{
-		client:     client,
-		config:     cfg,
-		tools:      toolManager,
-		maxTurns:   cfg.Agent.MaxTurns,
-		renderer:   markdown.New(true),
-		retryCount: 3,
-		retryDelay: 2 * time.Second,
+		client:        llm.NewClient(&cfg.LLM),
+		config:        cfg,
+		tools:         toolManager,
+		maxTurns:      maxTurns,
+		maxHistory:    maxHistory,
+		contextTokens: contextTokens,
+		summarize:     cfg.Agent.Summarize,
+		renderer:      markdown.New(true),
+		retryCount:    3,
+		retryDelay:    2 * time.Second,
 	}, nil
 }
 
-// Process sends a user message to the agent and returns the response.
-func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
-	if len(a.history) >= a.maxTurns {
-		a.history = a.history[len(a.history)-10:]
-	}
+// SetToolPolicy applies a confirmation policy for dangerous tool operations.
+// mode is one of: "ask" (prompt via askFn), "always" (allow), "never" (deny).
+func (a *Agent) SetToolPolicy(mode string, askFn func(toolName, action, detail string) bool) {
+	a.tools.SetPolicy(tools.Policy{
+		Mode: tools.ConfirmationMode(mode),
+		Ask:  askFn,
+	})
+}
 
-	messages := llm.BuildMessages(a.config.Agent.SystemPrompt, a.history, userMsg)
+// SetMemory enables long-term memory backed by the given store.
+func (a *Agent) SetMemory(store *history.Store) {
+	a.memory = store
+}
+
+// Process sends a user message to the agent and runs the tool-calling loop
+// until the model produces a final answer. Returns the raw (unrendered)
+// response content.
+func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
+	messages := a.newConversationMessages(ctx, userMsg)
 	functions := a.tools.ToFunctionDefinitions()
 
-	turn := 0
-	for turn < a.maxTurns {
+	for turn := 0; turn < a.maxTurns; turn++ {
 		resp, err := a.chatWithRetry(ctx, messages, functions)
 		if err != nil {
 			return "", fmt.Errorf("chat error: %w", err)
 		}
+		a.recordUsage(resp.Usage)
 
-		// If no function call, return the content
+		// No function call — this is the final answer.
 		if resp.FunctionCall == nil {
-			a.history = append(a.history,
-				llm.Message{Role: "assistant", Content: resp.Content},
-			)
-			// Render markdown for display
-			return a.renderer.Render(resp.Content), nil
+			a.appendAssistant(resp.Content)
+			return resp.Content, nil
 		}
 
-		// Process function call
+		// Execute the requested tool and feed the result back to the model.
+		argsJSON := normalizeArguments(resp.FunctionCall.Arguments)
+
 		messages = append(messages, llm.Message{
 			Role:    "assistant",
-			Content: "",
+			Content: resp.Content,
 		})
-
-		// Handle arguments - GigaChat returns them as JSON object
-		var argsJSON string
-		switch v := resp.FunctionCall.Arguments.(type) {
-		case string:
-			argsJSON = v
-		case map[string]interface{}:
-			b, _ := json.Marshal(v)
-			argsJSON = string(b)
-		case nil:
-			argsJSON = "{}"
-		default:
-			b, _ := json.Marshal(v)
-			argsJSON = string(b)
-		}
 
 		rawResult, err := a.tools.Execute(resp.FunctionCall.Name, argsJSON)
 		if err != nil {
 			rawResult = fmt.Sprintf("Error: %v", err)
 		}
 
-		// GigaChat requires function results as JSON strings
+		// GigaChat requires function results as JSON strings.
 		resultJSON, _ := json.Marshal(map[string]string{
 			"result": rawResult,
 		})
@@ -102,16 +133,253 @@ func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
 			Name:    resp.FunctionCall.Name,
 			Content: string(resultJSON),
 		})
-
-		// Store result for return
-		a.history = append(a.history,
-			llm.Message{Role: "assistant", Content: rawResult},
-		)
-
-		return a.renderer.Render(rawResult), nil
 	}
 
-	return "Maximum turns reached. Please start a new conversation.", nil
+	return "", fmt.Errorf("maximum tool-calling turns (%d) reached", a.maxTurns)
+}
+
+// ProcessStream sends a user message and streams the response. Text chunks
+// are delivered to onChunk as they arrive. Tool calls are executed inside the
+// loop, after streaming ends. Returns the full raw response content.
+func (a *Agent) ProcessStream(ctx context.Context, userMsg string, onChunk func(content string)) (string, error) {
+	messages := a.newConversationMessages(ctx, userMsg)
+	functions := a.tools.ToFunctionDefinitions()
+
+	for turn := 0; turn < a.maxTurns; turn++ {
+		ch, err := a.client.Stream(ctx, messages, functions)
+		if err != nil {
+			return "", fmt.Errorf("stream error: %w", err)
+		}
+
+		var content strings.Builder
+		var call *llm.FunctionCall
+
+		for chunk := range ch {
+			if chunk.Usage != nil {
+				a.recordUsage(chunk.Usage)
+				continue
+			}
+			if chunk.FunctionCall != nil {
+				call = chunk.FunctionCall
+				continue
+			}
+			if chunk.Content != "" && onChunk != nil {
+				onChunk(chunk.Content)
+			}
+			content.WriteString(chunk.Content)
+			if chunk.IsComplete {
+				break
+			}
+		}
+
+		// No function call — this is the final answer.
+		if call == nil {
+			answer := content.String()
+			a.appendAssistant(answer)
+			return answer, nil
+		}
+
+		// Execute the requested tool and feed the result back to the model.
+		argsJSON := normalizeArguments(call.Arguments)
+
+		messages = append(messages, llm.Message{
+			Role:    "assistant",
+			Content: content.String(),
+		})
+
+		rawResult, err := a.tools.Execute(call.Name, argsJSON)
+		if err != nil {
+			rawResult = fmt.Sprintf("Error: %v", err)
+		}
+
+		resultJSON, _ := json.Marshal(map[string]string{
+			"result": rawResult,
+		})
+
+		messages = append(messages, llm.Message{
+			Role:    "function",
+			Name:    call.Name,
+			Content: string(resultJSON),
+		})
+	}
+
+	return "", fmt.Errorf("maximum tool-calling turns (%d) reached", a.maxTurns)
+}
+
+// newConversationMessages builds the message list for a new turn: system
+// prompt, relevant long-term memories, session history and the new user
+// message. The user message is also appended to the session history.
+func (a *Agent) newConversationMessages(ctx context.Context, userMsg string) []llm.Message {
+	a.compactHistory(ctx)
+	a.history = append(a.history, llm.Message{Role: "user", Content: userMsg})
+
+	messages := make([]llm.Message, 0, len(a.history)+2)
+	messages = append(messages, llm.Message{Role: "system", Content: a.systemPrompt(ctx, userMsg)})
+	messages = append(messages, a.history...)
+	return messages
+}
+
+// systemPrompt returns the system prompt, extended with relevant long-term
+// memories when available.
+func (a *Agent) systemPrompt(ctx context.Context, userMsg string) string {
+	prompt := a.config.Agent.SystemPrompt
+	memories := a.relevantMemories(ctx, userMsg)
+	if len(memories) > 0 {
+		prompt += "\n\nRelevant memories from previous sessions:\n- " + strings.Join(memories, "\n- ")
+	}
+	return prompt
+}
+
+// relevantMemories retrieves the most relevant long-term memories for the
+// user message. Errors are ignored — memories are best-effort.
+func (a *Agent) relevantMemories(ctx context.Context, userMsg string) []string {
+	if a.memory == nil || strings.TrimSpace(userMsg) == "" {
+		return nil
+	}
+	vec, err := a.client.Embed(ctx, userMsg)
+	if err != nil {
+		return nil
+	}
+	memories, err := a.memory.SearchMemories(vec, 3)
+	if err != nil {
+		return nil
+	}
+	var result []string
+	for _, m := range memories {
+		result = append(result, m.Text)
+	}
+	return result
+}
+
+// compactHistory enforces the message-count and token budgets on the session
+// history. When summarization is enabled, old messages are compressed into a
+// summary instead of being dropped.
+// compactHistory enforces the message-count and token budgets on the session
+// history. When summarization is enabled, one compaction pass replaces the
+// oldest half of the history with an LLM summary; the rest is trimmed.
+// A single pass per turn bounds the added latency.
+func (a *Agent) compactHistory(ctx context.Context) {
+	a.trimHistory()
+
+	if !a.summarize || a.contextTokens <= 0 {
+		return
+	}
+
+	if estimateTokens(a.history) > a.contextTokens && len(a.history) > 1 {
+		// Drop the oldest half (at least one message) and summarize it.
+		n := len(a.history) / 2
+		if n < 1 {
+			n = 1
+		}
+		dropped := a.history[:n]
+
+		summary, err := a.summarizeMessages(ctx, dropped)
+		if err != nil {
+			// Fall back to plain trimming.
+			a.trimHistory()
+			return
+		}
+
+		rest := append([]llm.Message(nil), a.history[n:]...)
+		a.history = append([]llm.Message{{
+			Role:    "assistant",
+			Content: "[Summary of earlier conversation]: " + summary,
+		}}, rest...)
+	}
+
+	a.trimHistory()
+}
+
+// summarizeMessages asks the model to summarize a conversation excerpt.
+func (a *Agent) summarizeMessages(ctx context.Context, msgs []llm.Message) (string, error) {
+	var b strings.Builder
+	for _, m := range msgs {
+		fmt.Fprintf(&b, "%s: %s\n", m.Role, m.Content)
+	}
+
+	req := []llm.Message{
+		{
+			Role:    "system",
+			Content: "Summarize the following conversation excerpt concisely, preserving key facts, decisions and results. Reply with the summary only.",
+		},
+		{Role: "user", Content: b.String()},
+	}
+
+	resp, err := a.chatWithRetry(ctx, req, nil)
+	if err != nil {
+		return "", err
+	}
+	a.recordUsage(resp.Usage)
+	return resp.Content, nil
+}
+
+// estimateTokens approximates the token count of the history.
+// Rough heuristic: ~3 characters per token (accounts for Cyrillic).
+func estimateTokens(history []llm.Message) int {
+	total := 0
+	for _, m := range history {
+		total += len([]rune(m.Content))/3 + 4 // +4 per-message overhead
+	}
+	return total
+}
+
+// appendAssistant records the final assistant answer in the session history.
+func (a *Agent) appendAssistant(content string) {
+	a.history = append(a.history, llm.Message{Role: "assistant", Content: content})
+	a.trimHistory()
+}
+
+// trimHistory keeps at most maxHistory messages in the session history.
+func (a *Agent) trimHistory() {
+	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
+		a.history = a.history[len(a.history)-a.maxHistory:]
+	}
+}
+
+// recordUsage accumulates token usage statistics from an API response.
+func (a *Agent) recordUsage(u *llm.Usage) {
+	if u == nil {
+		return
+	}
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	a.usage.PromptTokens += u.PromptTokens
+	a.usage.CompletionTokens += u.CompletionTokens
+	a.usage.TotalTokens += u.TotalTokens
+}
+
+// Usage returns the accumulated token usage for the session.
+func (a *Agent) Usage() llm.Usage {
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	return a.usage
+}
+
+// ResetUsage resets the session token usage counter.
+func (a *Agent) ResetUsage() {
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	a.usage = llm.Usage{}
+}
+
+// normalizeArguments converts function call arguments (string, JSON object or
+// nil) into a JSON string.
+func normalizeArguments(args interface{}) string {
+	switch v := args.(type) {
+	case string:
+		if v == "" {
+			return "{}"
+		}
+		return v
+	case map[string]interface{}:
+		b, _ := json.Marshal(v)
+		return string(b)
+	case nil:
+		return "{}"
+	default:
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
 }
 
 // chatWithRetry sends a chat request with retry logic.
@@ -148,6 +416,12 @@ func (a *Agent) History() []llm.Message {
 	return a.history
 }
 
+// LoadHistory replaces the session history with messages loaded from storage.
+func (a *Agent) LoadHistory(msgs []llm.Message) {
+	a.history = msgs
+	a.trimHistory()
+}
+
 // ClearHistory clears the conversation history.
 func (a *Agent) ClearHistory() {
 	a.history = nil
@@ -166,55 +440,4 @@ func (a *Agent) Renderer() *markdown.Renderer {
 // RegisterTool registers a custom tool with the agent.
 func (a *Agent) RegisterTool(t tools.Tool) {
 	a.tools.Register(t)
-}
-
-// ExecuteJSON executes a JSON-encoded function call.
-func ExecuteJSON(fn string, argsJSON string) (string, error) {
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	switch fn {
-	case "echo":
-		msg, ok := args["message"].(string)
-		if !ok {
-			return "", fmt.Errorf("message must be a string")
-		}
-		return msg, nil
-
-	case "calc":
-		expr, ok := args["expression"].(string)
-		if !ok {
-			return "", fmt.Errorf("expression must be a string")
-		}
-		return tools.Calculate(expr)
-
-	case "time":
-		return tools.GetCurrentTime()
-
-	case "weather":
-		location, ok := args["location"].(string)
-		if !ok {
-			return "", fmt.Errorf("location must be a string")
-		}
-		return tools.FetchWeather(location)
-
-	case "web_search":
-		query, ok := args["query"].(string)
-		if !ok {
-			return "", fmt.Errorf("query must be a string")
-		}
-		return tools.WebSearch(query)
-
-	case "code_interpreter":
-		code, ok := args["code"].(string)
-		if !ok {
-			return "", fmt.Errorf("code must be a string")
-		}
-		return tools.ExecuteCode(code)
-
-	default:
-		return "", fmt.Errorf("unknown function: %s", fn)
-	}
 }
