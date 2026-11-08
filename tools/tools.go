@@ -33,6 +33,8 @@ func NewManager() *Manager {
 	m.Register(&CalcTool{})
 	m.Register(&TimeTool{})
 	m.Register(&WeatherTool{})
+	m.Register(NewWebSearchTool())
+	m.Register(NewCodeInterpreterTool())
 	return m
 }
 
@@ -308,10 +310,7 @@ func evaluateExpression(expr string) (float64, error) {
 	}
 
 	final := result[0].value
-	for i := 1; i < len(result); i += 2 {
-		if i+1 >= len(result) {
-			return 0, fmt.Errorf("invalid expression")
-		}
+	for i := 1; i+1 < len(result); i += 2 {
 		op := result[i].op
 		next := result[i+1].value
 

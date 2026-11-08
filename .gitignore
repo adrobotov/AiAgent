@@ -1,5 +1,6 @@
 # Binaries
 *.exe
+*.exe~
 agent.exe
 
 # Vendor

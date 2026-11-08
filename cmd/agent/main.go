@@ -14,25 +14,16 @@ import (
 	"agent/agent"
 	"agent/config"
 	"agent/history"
+	"agent/llm"
+	"agent/vision"
 )
 
 var (
 	clearScreenCmd = regexp.MustCompile(`^\/clear$`)
 	exitCmd        = regexp.MustCompile(`^\/?(exit|quit|bye)$`)
 	helpCmd        = regexp.MustCompile(`^\/help$`)
-)
-
-// ANSI color codes
-const (
-	yellow    = "\033[33m"
-	green     = "\033[32m"
-	blue      = "\033[34m"
-	red       = "\033[31m"
-	white     = "\033[37m"
-	gray      = "\033[90m"
-	reset     = "\033[0m"
-	bold      = "\033[1m"
-	dim       = "\033[2m"
+	streamCmd      = regexp.MustCompile(`^\/stream$`)
+	visionCmd      = regexp.MustCompile(`^\/vision\s+(.+)$`)
 )
 
 func main() {
@@ -40,7 +31,7 @@ func main() {
 
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
-		fmt.Println(gray + "⚠️  Local config not found, trying home directory..." + reset)
+		fmt.Println("⚠️  Local config not found, trying home directory...")
 		cfg, err = config.Load(config.ConfigPath())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Could not load config: %v\n", err)
@@ -49,20 +40,20 @@ func main() {
 	}
 
 	if cfg.LLM.AuthKey == "" {
-		fmt.Println(yellow + "⚠️  Auth key not configured!" + reset)
+		fmt.Println("⚠️  Auth key not configured!")
 		fmt.Println("   Edit config.yaml and set auth_key.")
 		fmt.Println()
 	}
 
-	fmt.Printf(white + "✓" + reset + " Config loaded from: %s\n", "config.yaml")
-	fmt.Printf(white + "✓" + reset + " Model: %s\n", cfg.LLM.Model)
-	fmt.Printf(white + "✓" + reset + " AuthKey configured: %v\n", cfg.LLM.AuthKey != "")
+	fmt.Println("✓ Config loaded from: config.yaml")
+	fmt.Println("✓ Model:", cfg.LLM.Model)
+	fmt.Println("✓ AuthKey configured:", cfg.LLM.AuthKey != "")
 	fmt.Println()
 
 	// Initialize history store
 	store, err := history.New()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, gray+"Warning: Could not initialize history: %v\n"+reset, err)
+		fmt.Fprintf(os.Stderr, "Warning: Could not initialize history: %v\n", err)
 		store = nil
 	}
 	if store != nil {
@@ -84,7 +75,7 @@ func main() {
 
 	go func() {
 		<-sigChan
-		fmt.Println("\n\n" + gray + "Exiting..." + reset)
+		fmt.Println("\n\nExiting...")
 		os.Exit(0)
 	}()
 
@@ -95,7 +86,7 @@ func main() {
 	}
 
 	for {
-		fmt.Print(green + "You: " + reset)
+		fmt.Print("You: ")
 		if !scanner.Scan() {
 			break
 		}
@@ -112,17 +103,93 @@ func main() {
 			if store != nil {
 				convID, _ = store.NewConversation()
 			}
-			fmt.Println("\n" + gray + "✓ New conversation started" + reset + "\n")
+			fmt.Println("\n✓ New conversation started\n")
 			continue
 		}
 
 		if exitCmd.MatchString(input) {
-			fmt.Println("\n" + gray + "Goodbye!" + reset)
+			fmt.Println("\nGoodbye!")
 			break
 		}
 
 		if helpCmd.MatchString(input) {
 			printHelp()
+			continue
+		}
+
+		// Handle /stream command
+		if streamCmd.MatchString(input) {
+			fmt.Println("\nStreaming mode enabled. Type your message:")
+			scanner.Scan()
+			streamInput := scanner.Text()
+			fmt.Println()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			messages := llm.BuildMessages(cfg.Agent.SystemPrompt, nil, streamInput)
+			ch, err := ag.Client().Stream(ctx, messages, nil)
+			if err != nil {
+				fmt.Println("❌ Error:", err.Error())
+				continue
+			}
+
+			var fullResponse strings.Builder
+			for chunk := range ch {
+				if chunk.IsComplete {
+					break
+				}
+				fmt.Print(chunk.Content)
+				fullResponse.WriteString(chunk.Content)
+			}
+			fmt.Println("\n")
+			continue
+		}
+
+		// Handle /vision command
+		if visionCmd.MatchString(input) {
+			matches := visionCmd.FindStringSubmatch(input)
+			if len(matches) < 2 {
+				fmt.Println("Usage: /vision <image_path> <question>")
+				continue
+			}
+
+			imagePath := matches[1]
+			image, err := vision.LoadImage(imagePath)
+			if err != nil {
+				fmt.Println("❌ Error loading image:", err.Error())
+				continue
+			}
+
+			// Read next line for question
+			fmt.Print("Question about image: ")
+			scanner.Scan()
+			question := scanner.Text()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			// Build message with image
+			messages := []llm.Message{
+				{Role: "system", Content: cfg.Agent.SystemPrompt},
+				{
+					Role: "user",
+					Content: fmt.Sprintf(
+						`<img src="%s"> %s`,
+						image.ToURL(),
+						question,
+					),
+				},
+			}
+
+			fmt.Print("Agent: ")
+			resp, err := ag.Client().Chat(ctx, messages, nil)
+			if err != nil {
+				fmt.Println("\n❌ Error:", err.Error())
+				continue
+			}
+
+			fmt.Println("\n" + ag.Renderer().Render(resp.Content) + "\n")
 			continue
 		}
 
@@ -135,15 +202,15 @@ func main() {
 		}
 
 		// Process the message with loading animation
-		fmt.Print(blue + "Agent: " + reset)
+		fmt.Print("Agent: ")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			response, err := ag.Process(ctx, input)
 			if err != nil {
-				fmt.Printf("\n" + red + "❌ Error: %v" + reset + "\n\n", err)
+				fmt.Printf("\n❌ Error: %v\n\n", err)
 			} else {
-				fmt.Printf("\n%s\n\n", response)
+				fmt.Println("\n" + response + "\n")
 			}
 
 			// Save assistant message to history
@@ -164,7 +231,7 @@ func main() {
 			select {
 			case <-ticker.C:
 				dots = (dots + 1) % 4
-				fmt.Printf("\r" + dim + "%s" + reset, strings.Repeat(".", dots))
+				fmt.Printf("\r%s", strings.Repeat(".", dots))
 			case <-ctx.Done():
 				ticker.Stop()
 				goto nextInput
@@ -180,19 +247,19 @@ func main() {
 }
 
 func printBanner() {
-	fmt.Println(bold + "╔══════════════════════════════════════╗" + reset)
-	fmt.Println(bold + "║     " + white + "AI Agent - Interactive CLI" + bold + "       ║" + reset)
-	fmt.Println(bold + "║  " + dim + "Type 'help' for commands" + bold + "             ║" + reset)
-	fmt.Println(bold + "╚══════════════════════════════════════╝" + reset)
+	fmt.Println("╔══════════════════════════════════════╗")
+	fmt.Println("║     AI Agent - Interactive CLI       ║")
+	fmt.Println("║  Type 'help' for commands             ║")
+	fmt.Println("╚══════════════════════════════════════╝")
 	fmt.Println()
 }
 
 func printHelp() {
-	fmt.Println(dim + "Commands:" + reset)
-	fmt.Println("  " + bold + "/help" + reset + "      - Show this help message")
-	fmt.Println("  " + bold + "/clear" + reset + "     - Clear conversation history")
-	fmt.Println("  " + bold + "/exit" + reset + "      - Exit the agent")
+	fmt.Println("Commands:")
+	fmt.Println("  /help      - Show this help message")
+	fmt.Println("  /clear     - Clear conversation history")
+	fmt.Println("  /exit      - Exit the agent")
 	fmt.Println()
-	fmt.Println(dim + "Config File:" + reset)
+	fmt.Println("Config File:")
 	fmt.Println("  Path: ./config.yaml")
 }

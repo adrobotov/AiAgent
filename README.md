@@ -5,7 +5,7 @@
 ## Возможности
 
 - 💬 Интерактивный чат-интерфейс в терминале
-- 🧰 Система инструментов (echo, calc, time, weather)
+- 🧰 Система инструментов (echo, calc, time, weather, web_search, code_interpreter)
 - 🤖 Поддержка GigaChat API с OAuth аутентификацией
 - 🎨 Markdown рендеринг для красивого вывода
 - 🎨 Цветной вывод в терминале
@@ -15,6 +15,20 @@
 - ⚙️ Конфигурация через YAML файл
 - 📜 История диалога с ограничением контекста
 - 🎯 Function calling / Tool calling
+- 📡 **Streaming** — потоковая генерация ответов (`/stream`)
+- 👁️ **Vision** — анализ изображений (`/vision <path> <question>`)
+- 🌐 **Web Search** — поиск в интернете (DuckDuckGo)
+- 💻 **Code Interpreter** — выполнение Go кода
+
+## Команды CLI
+
+| Команда | Описание |
+|---------|----------|
+| `/help` | Показать справку |
+| `/clear` | Новая беседа |
+| `/exit` | Выйти |
+| `/stream` | Режим потоковой генерации |
+| `/vision <path> <question>` | Анализ изображения |
 
 ## Требования
 
@@ -99,14 +113,16 @@ go run ./cmd/agent
 
 ```
 AiAgent/
-├── cmd/agent/        # Точка входа (CLI)
+├── cmd/agent/        # CLI с цветами и анимацией
 ├── config/           # Конфигурация
-├── llm/              # Клиент GigaChat API
+├── llm/              # Клиент GigaChat API (streaming)
 ├── auth/             # OAuth аутентификация
-├── agent/            # Ядро агента
-├── tools/            # Система инструментов
-├── history/          # SQLite история диалогов
+├── agent/            # Ядро с retry логикой
+├── tools/            # Инструменты (web_search, code_interpreter)
+├── history/          # SQLite история
 ├── markdown/         # Markdown рендеринг
+├── vision/           # Vision (изображения)
+├── structured/       # Structured output (JSON schema)
 ├── config.yaml       # Файл конфигурации
 ├── go.mod
 └── go.sum
@@ -124,12 +140,19 @@ AiAgent/
 - ✅ SQLite история диалогов
 - ✅ Улучшенный CLI
 
-### 🟡 Фаза 2 — Расширение возможностей
-- [ ] **Мультимодальность** — поддержка изображений (vision)
-- [ ] **Streaming** — потоковая генерация ответов
-- [ ] **Structured Output** — JSON-ответы по схеме
-- [ ] **Web Search** — встроенный поиск в интернете
-- [ ] **Code Interpreter** — выполнение Python/Go кода
+### ✅ Фаза 2 — Расширение возможностей (завершена)
+- ✅ **Streaming** — потоковая генерация ответов
+- ✅ **Vision** — поддержка изображений
+- ✅ **Structured Output** — JSON schema валидация
+- ✅ **Web Search** — поиск через DuckDuckGo
+- ✅ **Code Interpreter** — выполнение Go кода
+
+### 🟠 Фаза 3 — Агенты и автоматизация
+- [ ] **Multi-agent** — система с несколькими агентами
+- [ ] **Task Planner** — планирование сложных задач
+- [ ] **Memory** — долговременная память (embeddings)
+- [ ] **Plugins** — система плагинов для расширения
+- [ ] **API Server** — HTTP API для интеграции
 
 ## GigaCode Integration
 

@@ -1,12 +1,14 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"agent/auth"
 	"agent/config"
@@ -29,6 +31,13 @@ type FunctionCall struct {
 type Response struct {
 	Content      string
 	FunctionCall *FunctionCall
+}
+
+// StreamChunk represents a chunk from streaming response.
+type StreamChunk struct {
+	Content      string
+	FunctionCall *FunctionCall
+	IsComplete   bool
 }
 
 // Client is the LLM API client for GigaChat.
@@ -67,7 +76,6 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 		return nil, fmt.Errorf("auth error: %w", err)
 	}
 
-	// Build GigaChat-specific request
 	reqBody := map[string]interface{}{
 		"model":       c.config.Model,
 		"temperature": c.config.Temperature,
@@ -78,7 +86,6 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	}
 
 	if len(functions) > 0 {
-		// GigaChat expects functions as a flat array at top level
 		reqBody["functions"] = functions
 	}
 
@@ -135,18 +142,131 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	}
 
 	if apiResp.Choices[0].Message.FunctionCall != nil {
-		// GigaChat returns arguments as JSON object, not string
-		argsJSON, err := json.Marshal(apiResp.Choices[0].Message.FunctionCall.Arguments)
-		if err != nil {
-			return nil, fmt.Errorf("marshal arguments: %w", err)
-		}
-		result.FunctionCall = &FunctionCall{
-			Name:      apiResp.Choices[0].Message.FunctionCall.Name,
-			Arguments: string(argsJSON),
-		}
+		result.FunctionCall = apiResp.Choices[0].Message.FunctionCall
 	}
 
 	return result, nil
+}
+
+// Stream sends a message to GigaChat and returns a channel of streaming chunks.
+func (c *Client) Stream(ctx context.Context, messages []Message, functions []FunctionDefinition) (<-chan StreamChunk, error) {
+	token, err := c.getAuthToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("auth error: %w", err)
+	}
+
+	reqBody := map[string]interface{}{
+		"model":       c.config.Model,
+		"temperature": c.config.Temperature,
+		"max_tokens":  c.config.MaxTokens,
+		"stream":      true,
+		"top_p":       1.0,
+		"messages":    messages,
+	}
+
+	if len(functions) > 0 {
+		reqBody["functions"] = functions
+	}
+
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/chat/completions", bytes.NewReader(reqJSON))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Connection", "keep-alive")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	ch := make(chan StreamChunk, 10)
+
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+		var fullContent strings.Builder
+		var fullFuncCall *FunctionCall
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// Skip empty lines and comment lines
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+
+			// Parse SSE data
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+
+			data := strings.TrimPrefix(line, "data: ")
+
+			// End of stream
+			if data == "[DONE]" {
+				ch <- StreamChunk{
+					Content:    fullContent.String(),
+					IsComplete: true,
+				}
+				return
+			}
+
+			// Parse chunk
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content      string      `json:"content"`
+						FunctionCall *FunctionCall `json:"function_call"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+
+			delta := chunk.Choices[0].Delta
+
+			if delta.Content != "" {
+				fullContent.WriteString(delta.Content)
+				ch <- StreamChunk{
+					Content:    delta.Content,
+					IsComplete: false,
+				}
+			}
+
+			if delta.FunctionCall != nil {
+				fullFuncCall = delta.FunctionCall
+			}
+		}
+
+		// If we have a function call but no content, send it
+		if fullFuncCall != nil && fullContent.Len() == 0 {
+			ch <- StreamChunk{
+				FunctionCall: fullFuncCall,
+				IsComplete:   true,
+			}
+		}
+	}()
+
+	return ch, nil
 }
 
 // getAuthToken returns a valid access token for GigaChat.

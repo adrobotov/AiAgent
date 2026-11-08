@@ -153,6 +153,16 @@ func (a *Agent) ClearHistory() {
 	a.history = nil
 }
 
+// Client returns the LLM client.
+func (a *Agent) Client() *llm.Client {
+	return a.client
+}
+
+// Renderer returns the markdown renderer.
+func (a *Agent) Renderer() *markdown.Renderer {
+	return a.renderer
+}
+
 // RegisterTool registers a custom tool with the agent.
 func (a *Agent) RegisterTool(t tools.Tool) {
 	a.tools.Register(t)
@@ -189,6 +199,20 @@ func ExecuteJSON(fn string, argsJSON string) (string, error) {
 			return "", fmt.Errorf("location must be a string")
 		}
 		return tools.FetchWeather(location)
+
+	case "web_search":
+		query, ok := args["query"].(string)
+		if !ok {
+			return "", fmt.Errorf("query must be a string")
+		}
+		return tools.WebSearch(query)
+
+	case "code_interpreter":
+		code, ok := args["code"].(string)
+		if !ok {
+			return "", fmt.Errorf("code must be a string")
+		}
+		return tools.ExecuteCode(code)
 
 	default:
 		return "", fmt.Errorf("unknown function: %s", fn)

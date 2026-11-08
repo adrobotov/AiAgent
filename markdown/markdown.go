@@ -3,8 +3,20 @@ package markdown
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 )
+
+// stripANSI removes ANSI escape codes from text
+func stripANSI(text string) string {
+	// Match actual ESC characters (0x1B) followed by ANSI sequences
+	r := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\([a-zA-Z]`)
+	text = r.ReplaceAllString(text, "")
+	// Also remove literal \033 sequences (sometimes sent as text)
+	r2 := regexp.MustCompile(`\\033\[[0-9;]*[a-zA-Z]`)
+	text = r2.ReplaceAllString(text, "")
+	return text
+}
 
 // Renderer renders markdown text for terminal display.
 type Renderer struct {
@@ -13,6 +25,10 @@ type Renderer struct {
 
 // New creates a new markdown renderer.
 func New(colors bool) *Renderer {
+	// Disable ANSI colors on Windows (PowerShell doesn't support them well)
+	if colors && runtime.GOOS == "windows" {
+		colors = false
+	}
 	return &Renderer{colors: colors}
 }
 
@@ -22,121 +38,127 @@ func (r *Renderer) Render(text string) string {
 		return text
 	}
 
-	// Process line by line
+	// Strip ANSI escape codes from input
+	text = stripANSI(text)
+
 	lines := strings.Split(text, "\n")
 	var result []string
 
-	for i, line := range lines {
-		result = append(result, r.renderLine(line, i == 0))
+	for _, line := range lines {
+		result = append(result, r.renderLine(line))
 	}
 
 	return strings.Join(result, "\n")
 }
 
-func (r *Renderer) renderLine(line string, isFirst bool) string {
+func (r *Renderer) renderLine(line string) string {
 	line = strings.TrimSpace(line)
 
-	// Code blocks (``` ... ```)
+	// Code blocks
 	if strings.HasPrefix(line, "```") {
-		return r.renderCodeBlock(line)
+		if r.colors {
+			return fmt.Sprintf("\033[90m%s\033[0m", line)
+		}
+		return "▸ " + line
 	}
 
 	// Headers
 	if strings.HasPrefix(line, "### ") {
-		return r.colorize(line, "#888888") + "\n"
+		if r.colors {
+			return fmt.Sprintf("\033[90m%s\033[0m", line)
+		}
+		return "▸ " + line[4:]
 	}
 	if strings.HasPrefix(line, "## ") {
-		return r.colorize(line, "#aaaaaa") + "\n"
+		if r.colors {
+			return fmt.Sprintf("\033[97m%s\033[0m", line)
+		}
+		return "## " + line[3:]
 	}
 	if strings.HasPrefix(line, "# ") {
-		return r.colorize(line, "#cccccc") + "\n"
+		if r.colors {
+			return fmt.Sprintf("\033[1m\033[97m%s\033[0m", line)
+		}
+		return "# " + line[2:]
 	}
 
 	// Unordered lists
 	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-		return r.colorize(line[:2], "#4CAF50") + " " + r.renderInline(line[2:])
+		if r.colors {
+			return fmt.Sprintf("\033[32m%s\033[0m %s", line[:2], r.renderInline(line[2:]))
+		}
+		return "  • " + r.renderInline(line[2:])
 	}
 	if strings.HasPrefix(line, "  - ") || strings.HasPrefix(line, "  * ") {
-		return r.colorize(line[:4], "#4CAF50") + " " + r.renderInline(line[4:])
+		if r.colors {
+			return fmt.Sprintf("\033[32m%s\033[0m %s", line[:4], r.renderInline(line[4:]))
+		}
+		return "    • " + r.renderInline(line[4:])
 	}
 
 	// Ordered lists
-	if reOrderedList.MatchString(line) {
-		return r.colorize(line[:2], "#4CAF50") + " " + r.renderInline(line[2:])
+	if orderedList.MatchString(line) {
+		if r.colors {
+			return fmt.Sprintf("\033[32m%s\033[0m %s", line[:2], r.renderInline(line[2:]))
+		}
+		return "  " + line
 	}
 
 	// Horizontal rule
 	if line == "---" || line == "***" || line == "___" {
-		return r.colorize(strings.Repeat("─", 80), "#555555")
+		if r.colors {
+			return fmt.Sprintf("\033[90m%s\033[0m", strings.Repeat("─", 80))
+		}
+		return strings.Repeat("─", 80)
 	}
 
 	// Blockquote
 	if strings.HasPrefix(line, "> ") {
-		return r.colorize("> ", "#888888") + r.renderInline(line[2:])
+		if r.colors {
+			return fmt.Sprintf("\033[90m%s\033[0m%s", "> ", r.renderInline(line[2:]))
+		}
+		return "  > " + r.renderInline(line[2:])
 	}
 
-	// Regular line with inline formatting
 	return r.renderInline(line)
 }
 
-func (r *Renderer) renderCodeBlock(line string) string {
-	// Start of code block
-	if !strings.HasSuffix(line, "```") {
-		return r.colorize(line, "#000000") + "\n"
-	}
-	// End of code block
-	return r.colorize(line, "#000000") + "\n"
-}
-
+// renderInline applies inline formatting: bold, italic, code.
 func (r *Renderer) renderInline(text string) string {
 	if !r.colors {
+		// Plain text mode with unicode markers
+		text = boldRegex.ReplaceAllStringFunc(text, func(match string) string {
+			cleaned := strings.TrimPrefix(match, "**")
+			cleaned = strings.TrimSuffix(cleaned, "**")
+			return "【" + cleaned + "】"
+		})
+		text = codeRegex.ReplaceAllStringFunc(text, func(match string) string {
+			cleaned := strings.TrimPrefix(match, "`")
+			cleaned = strings.TrimSuffix(cleaned, "`")
+			return "「" + cleaned + "」"
+		})
 		return text
 	}
 
-	// Bold: **text** or __text__
-	text = reBold.ReplaceAllStringFunc(text, func(match string) string {
+	// Bold: **text**
+	text = boldRegex.ReplaceAllStringFunc(text, func(match string) string {
 		cleaned := strings.TrimPrefix(match, "**")
-		cleaned = strings.TrimPrefix(cleaned, "__")
 		cleaned = strings.TrimSuffix(cleaned, "**")
-		cleaned = strings.TrimSuffix(cleaned, "__")
-		return r.colorize(cleaned, "#ffffff")
-	})
-
-	// Italic: *text* or _text_
-	text = reItalic.ReplaceAllStringFunc(text, func(match string) string {
-		cleaned := strings.TrimPrefix(match, "*")
-		cleaned = strings.TrimPrefix(cleaned, "_")
-		cleaned = strings.TrimSuffix(cleaned, "*")
-		cleaned = strings.TrimSuffix(cleaned, "_")
-		return r.colorize(cleaned, "#cccccc")
+		return fmt.Sprintf("\033[1m\033[97m%s\033[0m", cleaned)
 	})
 
 	// Inline code: `code`
-	text = reInlineCode.ReplaceAllStringFunc(text, func(match string) string {
+	text = codeRegex.ReplaceAllStringFunc(text, func(match string) string {
 		cleaned := strings.TrimPrefix(match, "`")
 		cleaned = strings.TrimSuffix(cleaned, "`")
-		return r.colorize(cleaned, "#f0f0f0")
-	})
-
-	// Links: [text](url)
-	text = reLink.ReplaceAllStringFunc(text, func(match string) string {
-		return match // Keep as-is, URL will be visible
+		return fmt.Sprintf("\033[97m\033[47m%s\033[0m", cleaned)
 	})
 
 	return text
 }
 
-func (r *Renderer) colorize(text string, color string) string {
-	if !r.colors {
-		return text
-	}
-	return fmt.Sprintf("\033[%sm%s\033[0m", color, text)
-}
-
 var (
-	reBold      = regexp.MustCompile(`\*\*[^*]+\*\*|__[^_]+__`)
-	reItalic    = regexp.MustCompile(`(?<!\*)\*[^*]+\*(?!\*)|(?<!_)_[^_]+_(?!_)`)
-	reInlineCode = regexp.MustCompile("`[^`]+`")
-	reLink      = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reOrderedList = regexp.MustCompile(`^\d+\.\s`)
+	boldRegex     = regexp.MustCompile(`\*\*[^*]+\*\*`)
+	codeRegex     = regexp.MustCompile("`[^`]+`")
+	orderedList   = regexp.MustCompile(`^\d+\.\s`)
 )
