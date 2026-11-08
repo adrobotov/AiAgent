@@ -13,6 +13,7 @@ import (
 
 	"agent/agent"
 	"agent/config"
+	"agent/history"
 )
 
 var (
@@ -21,17 +22,25 @@ var (
 	helpCmd        = regexp.MustCompile(`^\/help$`)
 )
 
-func main() {
-	fmt.Println("╔══════════════════════════════════════╗")
-	fmt.Println("║     AI Agent - Interactive CLI       ║")
-	fmt.Println("║  Type 'help' for commands             ║")
-	fmt.Println("╚══════════════════════════════════════╝")
-	fmt.Println()
+// ANSI color codes
+const (
+	yellow    = "\033[33m"
+	green     = "\033[32m"
+	blue      = "\033[34m"
+	red       = "\033[31m"
+	white     = "\033[37m"
+	gray      = "\033[90m"
+	reset     = "\033[0m"
+	bold      = "\033[1m"
+	dim       = "\033[2m"
+)
 
-	// Try to load config from current directory first, then from home directory
+func main() {
+	printBanner()
+
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
-		fmt.Println("⚠️  Local config not found, trying home directory...")
+		fmt.Println(gray + "⚠️  Local config not found, trying home directory..." + reset)
 		cfg, err = config.Load(config.ConfigPath())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Could not load config: %v\n", err)
@@ -40,15 +49,25 @@ func main() {
 	}
 
 	if cfg.LLM.AuthKey == "" {
-		fmt.Println("⚠️  Auth key not configured!")
+		fmt.Println(yellow + "⚠️  Auth key not configured!" + reset)
 		fmt.Println("   Edit config.yaml and set auth_key.")
 		fmt.Println()
 	}
 
-	fmt.Printf("✓ Config loaded from: %s\n", "config.yaml")
-	fmt.Printf("✓ Model: %s\n", cfg.LLM.Model)
-	fmt.Printf("✓ AuthKey configured: %v\n", cfg.LLM.AuthKey != "")
+	fmt.Printf(white + "✓" + reset + " Config loaded from: %s\n", "config.yaml")
+	fmt.Printf(white + "✓" + reset + " Model: %s\n", cfg.LLM.Model)
+	fmt.Printf(white + "✓" + reset + " AuthKey configured: %v\n", cfg.LLM.AuthKey != "")
 	fmt.Println()
+
+	// Initialize history store
+	store, err := history.New()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, gray+"Warning: Could not initialize history: %v\n"+reset, err)
+		store = nil
+	}
+	if store != nil {
+		defer store.Close()
+	}
 
 	ag, err := agent.New(cfg)
 	if err != nil {
@@ -65,12 +84,18 @@ func main() {
 
 	go func() {
 		<-sigChan
-		fmt.Println("\n\nExiting...")
+		fmt.Println("\n\n" + gray + "Exiting..." + reset)
 		os.Exit(0)
 	}()
 
+	// Track conversation ID
+	convID, err := store.NewConversation()
+	if err != nil {
+		convID = 0
+	}
+
 	for {
-		fmt.Print("You: ")
+		fmt.Print(green + "You: " + reset)
 		if !scanner.Scan() {
 			break
 		}
@@ -84,13 +109,15 @@ func main() {
 
 		// Check for commands
 		if clearScreenCmd.MatchString(input) {
-			fmt.Println("\n✓ Conversation cleared\n")
-			ag.ClearHistory()
+			if store != nil {
+				convID, _ = store.NewConversation()
+			}
+			fmt.Println("\n" + gray + "✓ New conversation started" + reset + "\n")
 			continue
 		}
 
 		if exitCmd.MatchString(input) {
-			fmt.Println("\nGoodbye! 👋")
+			fmt.Println("\n" + gray + "Goodbye!" + reset)
 			break
 		}
 
@@ -99,32 +126,51 @@ func main() {
 			continue
 		}
 
-		// Process the message
-		func() {
-			fmt.Print("\nAgent: ")
+		// Save user message to history
+		if store != nil && convID > 0 {
+			store.SaveMessage(convID, history.Message{
+				Role:    "user",
+				Content: input,
+			})
+		}
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+		// Process the message with loading animation
+		fmt.Print(blue + "Agent: " + reset)
 
-			done := make(chan string, 1)
-			go func() {
-				response, err := ag.Process(ctx, input)
-				if err != nil {
-					fmt.Printf("\n❌ Error: %v\n", err)
-					return
-				}
-				done <- response
-			}()
-
-			select {
-			case response := <-done:
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			response, err := ag.Process(ctx, input)
+			if err != nil {
+				fmt.Printf("\n" + red + "❌ Error: %v" + reset + "\n\n", err)
+			} else {
 				fmt.Printf("\n%s\n\n", response)
-			case <-ctx.Done():
-				return
-			case <-time.After(60 * time.Second):
-				fmt.Println("\n⏱ Timeout, please try again.")
 			}
+
+			// Save assistant message to history
+			if store != nil && convID > 0 && err == nil {
+				store.SaveMessage(convID, history.Message{
+					Role:    "assistant",
+					Content: response,
+				})
+			}
+			cancel()
 		}()
+
+		// Loading animation
+		dots := 0
+		ticker := time.NewTicker(150 * time.Millisecond)
+
+		for {
+			select {
+			case <-ticker.C:
+				dots = (dots + 1) % 4
+				fmt.Printf("\r" + dim + "%s" + reset, strings.Repeat(".", dots))
+			case <-ctx.Done():
+				ticker.Stop()
+				goto nextInput
+			}
+		}
+	nextInput:
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -133,24 +179,20 @@ func main() {
 	}
 }
 
-func printHelp() {
-	fmt.Println(`
-Commands:
-  /help      - Show this help message
-  /clear     - Clear conversation history
-  /exit      - Exit the agent
+func printBanner() {
+	fmt.Println(bold + "╔══════════════════════════════════════╗" + reset)
+	fmt.Println(bold + "║     " + white + "AI Agent - Interactive CLI" + bold + "       ║" + reset)
+	fmt.Println(bold + "║  " + dim + "Type 'help' for commands" + bold + "             ║" + reset)
+	fmt.Println(bold + "╚══════════════════════════════════════╝" + reset)
+	fmt.Println()
+}
 
-Config File:
-  Path: ./config.yaml
-  
-  Example config:
-    llm:
-      base_url: https://api.giga.chat/v1
-      model: GigaChat-2-Max
-      auth_key: your-authorization-key
-      oauth_scope: GIGACHAT_API_PERS
-      oauth_rquid: your-rquid-uuid
-      temperature: 0.7
-      max_tokens: 4096
-`)
+func printHelp() {
+	fmt.Println(dim + "Commands:" + reset)
+	fmt.Println("  " + bold + "/help" + reset + "      - Show this help message")
+	fmt.Println("  " + bold + "/clear" + reset + "     - Clear conversation history")
+	fmt.Println("  " + bold + "/exit" + reset + "      - Exit the agent")
+	fmt.Println()
+	fmt.Println(dim + "Config File:" + reset)
+	fmt.Println("  Path: ./config.yaml")
 }

@@ -4,19 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"agent/config"
 	"agent/llm"
+	"agent/markdown"
 	"agent/tools"
 )
 
 // Agent is the main AI agent that processes user requests.
 type Agent struct {
-	client   *llm.Client
-	config   *config.Config
-	tools    *tools.Manager
-	history  []llm.Message
-	maxTurns int
+	client     *llm.Client
+	config     *config.Config
+	tools      *tools.Manager
+	history    []llm.Message
+	maxTurns   int
+	renderer   *markdown.Renderer
+	retryCount int
+	retryDelay time.Duration
 }
 
 // New creates a new Agent instance.
@@ -25,10 +31,13 @@ func New(cfg *config.Config) (*Agent, error) {
 	toolManager := tools.NewManager()
 
 	return &Agent{
-		client:   client,
-		config:   cfg,
-		tools:    toolManager,
-		maxTurns: cfg.Agent.MaxTurns,
+		client:     client,
+		config:     cfg,
+		tools:      toolManager,
+		maxTurns:   cfg.Agent.MaxTurns,
+		renderer:   markdown.New(true),
+		retryCount: 3,
+		retryDelay: 2 * time.Second,
 	}, nil
 }
 
@@ -43,7 +52,7 @@ func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
 
 	turn := 0
 	for turn < a.maxTurns {
-		resp, err := a.client.Chat(ctx, messages, functions)
+		resp, err := a.chatWithRetry(ctx, messages, functions)
 		if err != nil {
 			return "", fmt.Errorf("chat error: %w", err)
 		}
@@ -53,7 +62,8 @@ func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
 			a.history = append(a.history,
 				llm.Message{Role: "assistant", Content: resp.Content},
 			)
-			return resp.Content, nil
+			// Render markdown for display
+			return a.renderer.Render(resp.Content), nil
 		}
 
 		// Process function call
@@ -68,8 +78,6 @@ func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
 		case string:
 			argsJSON = v
 		case map[string]interface{}:
-			// arguments is a JSON object like {"expression": "10*10+5"}
-			// Marshal it back to proper JSON
 			b, _ := json.Marshal(v)
 			argsJSON = string(b)
 		case nil:
@@ -100,10 +108,39 @@ func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
 			llm.Message{Role: "assistant", Content: rawResult},
 		)
 
-		return rawResult, nil
+		return a.renderer.Render(rawResult), nil
 	}
 
 	return "Maximum turns reached. Please start a new conversation.", nil
+}
+
+// chatWithRetry sends a chat request with retry logic.
+func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, functions []llm.FunctionDefinition) (*llm.Response, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= a.retryCount; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(a.retryDelay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		resp, err := a.client.Chat(ctx, messages, functions)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+
+		// Don't retry on certain errors
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "422") {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d attempts: %w", a.retryCount, lastErr)
 }
 
 // History returns the conversation history.
