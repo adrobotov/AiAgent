@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	// Pure-Go SQLite driver — enables CGO_ENABLED=0 cross-compilation.
+	_ "modernc.org/sqlite"
 )
 
 // Message represents a chat message for history storage.
@@ -49,7 +50,7 @@ func NewWithPath(path string) (*Store, error) {
 		return nil, fmt.Errorf("create history dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

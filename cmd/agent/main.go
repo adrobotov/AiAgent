@@ -12,6 +12,14 @@ import (
 )
 
 func main() {
+	// --version prints the build version and exits.
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			printVersion()
+			return
+		}
+	}
+
 	printBanner()
 
 	cfg, err := config.Load("config.yaml")

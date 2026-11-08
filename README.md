@@ -43,7 +43,7 @@
 
 ## Требования
 
-- Go 1.22+
+- Go 1.26+
 
 ## Установка
 
@@ -51,8 +51,22 @@
 # Установить зависимости
 go mod tidy
 
-# Собрать проект
-go build ./cmd/agent
+# Собрать проект (с версией)
+go build -ldflags "-X main.version=v1.0.0" -o aiagent ./cmd/agent
+
+# Или через Makefile
+make build VERSION=v1.0.0
+
+# Проверить версию
+./aiagent --version
+```
+
+## Примеры использования как библиотеки
+
+```bash
+go run ./examples/basic  "What is 2 + 2?"   # один запрос → ответ
+go run ./examples/stream "Tell me a story"  # стриминг ответа
+go run ./examples/server                     # HTTP API на :8080
 ```
 
 ## Настройка
@@ -223,12 +237,19 @@ AiAgent/
 - ✅ **Web Search** — поиск через DuckDuckGo
 - ✅ **Code Interpreter** — выполнение Go кода
 
-### 🟠 Фаза 3 — Агенты и автоматизация
-- [ ] **Multi-agent** — система с несколькими агентами
-- [ ] **Task Planner** — планирование сложных задач
-- [ ] **Memory** — долговременная память (embeddings)
-- [ ] **Plugins** — система плагинов для расширения
-- [ ] **API Server** — HTTP API для интеграции
+### ✅ Фаза 3 — Агенты и автоматизация (завершена)
+- ✅ **Multi-agent** — pipeline planner → executor → critic (`/team`)
+- ✅ **Task Planner** — декомпозиция и пошаговое выполнение (`/plan`)
+- ✅ **Memory** — долговременная память на embeddings (`/remember`)
+- ✅ **Plugins** — внешние инструменты через subprocess-протокол
+- ✅ **API Server** — HTTP API с SSE-стримингом (`/serve`)
+
+### ✅ Фаза 4 — Дистрибуция (завершена)
+- ✅ Версионирование `--version` через ldflags
+- ✅ GoReleaser (linux/windows/darwin, amd64/arm64) + release в CI
+- ✅ Примеры библиотечного использования (`examples/`)
+- ✅ Godoc для всех пакетов
+- ✅ Pure-Go SQLite — кросс-компиляция без cgo
 
 ## GigaCode Integration
 

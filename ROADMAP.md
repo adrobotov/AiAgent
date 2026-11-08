@@ -81,11 +81,14 @@
 - [x] **3.5. Экспорт разговоров**: `/export <id> [markdown|json]` — выгрузка в файл `export_<id>.md`/`.json`.
 - [x] Тесты фазы 3: интеграционный тест плагина (сборка helper-exe через `go build`), planner/team с mock-LLM (approved, revision, сбой критика), server (healthz, chat, SSE, usage, изоляция сессий).
 
-### 📦 Фаза 4 — Дистрибуция (по мере зрелости)
+### 📦 Фаза 4 — Дистрибуция (завершена)
 
-- [ ] Кросс-компиляция и релизы (GoReleaser),Homebrew/scoop.
-- [ ] Версионирование (`--version`), семантические релизы.
-- [ ] Документация: godoc-комментарии на всех экспортируемых API, примеры использования как библиотеки (`examples/`).
+- [x] **Версионирование**: `main.version` через ldflags, флаг `--version`; Makefile target `build VERSION=v1.0.0`.
+- [x] **GoReleaser**: `.goreleaser.yaml` — linux/windows/darwin × amd64/arm64, zip для Windows, checksums, changelog; release job в CI по тегу `v*`.
+- [x] **Pure-Go SQLite**: переход с `mattn/go-sqlite3` (cgo) на `modernc.org/sqlite` — кросс-компиляция с `CGO_ENABLED=0`.
+- [x] **Examples**: `examples/basic`, `examples/stream`, `examples/server` — использование агента как библиотеки.
+- [x] **Godoc**: пакетные доки (`doc.go`) для всех 10 публичных пакетов.
+- [x] **CI обновлён**: Go 1.26, матрица Ubuntu/Windows, lint, release по тегу.
 
 ---
 

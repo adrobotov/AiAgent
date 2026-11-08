@@ -1,8 +1,18 @@
-.PHONY: build run test vet fmt lint clean coverage
+.PHONY: build run test vet fmt lint clean coverage release version
 
-# Build the agent binary.
+VERSION ?= dev
+
+# Build the agent binary with the current version.
 build:
-	go build -o agent.exe ./cmd/agent
+	go build -ldflags "-X main.version=$(VERSION)" -o agent.exe ./cmd/agent
+
+# Print the version used at build time.
+version:
+	@echo $(VERSION)
+
+# Local release build (requires https://goreleaser.com).
+release:
+	goreleaser release --snapshot --clean
 
 # Run the agent.
 run:
