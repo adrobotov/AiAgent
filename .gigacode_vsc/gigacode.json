@@ -1,0 +1,30 @@
+{
+  "$schema": "https://app.tmp_not_exist_for_test.ru/config.json",
+  "model": "gigacode/vllm/CodeAgent",
+  "small_model": "gigacode/vllm/CodeAgent",
+  "default_agent": "code",
+  "snapshot": true,
+  "share": "manual",
+  "compaction": {
+    "auto": true,
+    "prune": true
+  },
+  "permission": {
+    "bash": "allow",
+    "edit": {
+      "**/*.go": "allow",
+      "**/*.md": "allow",
+      "**/*.yaml": "allow",
+      "**/*.json": "allow",
+      "*": "ask"
+    },
+    "read": "allow",
+    "skill": {
+      "gigacode-config": "allow"
+    }
+  },
+  "instructions": [
+    "GIGACODE.md",
+    "AGENTS.md"
+  ]
+}

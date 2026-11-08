@@ -1,0 +1,15 @@
+# Binaries
+*.exe
+agent.exe
+
+# Vendor
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Config with secrets
+config.yaml

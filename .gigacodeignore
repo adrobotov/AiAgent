@@ -1,0 +1,30 @@
+# Конфигурация с секретами
+config.yaml
+
+# Переменные окружения
+*.env
+!.env.example
+
+# Скомпилированные бинарные файлы
+*.exe
+agent
+
+# Зависимости (если есть vendor)
+vendor/
+
+# Логи
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+
+# Go тестовый кеш
+go.test.cache/
+
+# Временные файлы
+*.tmp
+*.bak
