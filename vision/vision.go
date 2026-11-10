@@ -9,9 +9,9 @@ import (
 
 // Image represents an image for vision processing.
 type Image struct {
-	Data       []byte
-	MIMEType   string
-	FileName   string
+	Data     []byte
+	MIMEType string
+	FileName string
 }
 
 // LoadImage loads an image from a file path.
@@ -81,8 +81,8 @@ func detectMIME(data []byte) string {
 		return "image/gif"
 	}
 
-	// Check WebP signature
-	if data[0] == 0x52 && data[1] == 0x57 && data[2] == 0x45 && data[3] == 0x46 {
+	// Check WebP signature (RIFF....WEBP)
+	if data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 {
 		return "image/webp"
 	}
 

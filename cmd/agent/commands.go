@@ -188,6 +188,11 @@ func commandTable() []command {
 			},
 		},
 		{
+			pattern: regexp.MustCompile(`^/model(?:\s+(\S+))?$`),
+			help:    "/model [name]      - Show or switch the LLM model",
+			handler: (*repl).handleModel,
+		},
+		{
 			pattern: regexp.MustCompile(`^/usage$`),
 			help:    "/usage             - Show session token usage",
 			handler: (*repl).handleUsage,
@@ -450,6 +455,63 @@ func (r *repl) handleStream(input string) bool {
 	}
 
 	r.saveMessage("assistant", response)
+	return false
+}
+
+// handleModel shows the current model and available models, or switches
+// the model: /model [name].
+func (r *repl) handleModel(input string) bool {
+	pattern := regexp.MustCompile(`^/model(?:\s+(\S+))?$`)
+	matches := pattern.FindStringSubmatch(input)
+
+	// No argument: show the current model and the available list.
+	if len(matches) < 2 || matches[1] == "" {
+		fmt.Printf("\n🤖 Current model: %s\n", r.ag.Model())
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		models, err := r.ag.Client().Models(ctx)
+		if err != nil || len(models) == 0 {
+			// Fallback to the known models list.
+			fmt.Println("Available models (built-in list, API unavailable):")
+			for _, m := range llm.KnownModels() {
+				marker := " "
+				if m == r.ag.Model() {
+					marker = ">"
+				}
+				fmt.Printf("  %s %s\n", marker, m)
+			}
+			if err != nil {
+				fmt.Printf("  (could not fetch from API: %v)\n", err)
+			}
+			fmt.Println()
+			return false
+		}
+
+		fmt.Println("Available models:")
+		for _, m := range models {
+			marker := " "
+			if m.ID == r.ag.Model() {
+				marker = ">"
+			}
+			fmt.Printf("  %s %s\n", marker, m.ID)
+		}
+		fmt.Println("\nSwitch with: /model <name>")
+		fmt.Println()
+		return false
+	}
+
+	// Switch the model.
+	newModel := matches[1]
+	oldModel := r.ag.Model()
+	if newModel == oldModel {
+		fmt.Printf("\n✓ Already using %s\n\n", newModel)
+		return false
+	}
+
+	r.ag.SetModel(newModel)
+	fmt.Printf("\n✓ Model switched: %s → %s\n\n", oldModel, newModel)
 	return false
 }
 

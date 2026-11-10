@@ -14,3 +14,7 @@ vendor/
 
 # Config with secrets
 config.yaml
+
+# Coverage artifacts
+cover.out
+coverage.out

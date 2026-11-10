@@ -97,11 +97,9 @@ func (s *Store) initDB() error {
 		return fmt.Errorf("create tables: %w", err)
 	}
 
-	// Migration: add name column if it doesn't exist
-	_, err = s.db.Exec("ALTER TABLE conversations ADD COLUMN name TEXT DEFAULT ''")
-	if err != nil {
-		// Column already exists or other error, ignore
-	}
+	// Migration: add name column if it doesn't exist.
+	// SQLite returns an error when the column already exists; ignore it.
+	_, _ = s.db.Exec("ALTER TABLE conversations ADD COLUMN name TEXT DEFAULT ''")
 
 	// Long-term memory table
 	if err := s.initMemoryDB(); err != nil {

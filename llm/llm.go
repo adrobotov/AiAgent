@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"agent/auth"
 	"agent/config"
@@ -16,9 +17,10 @@ import (
 
 // Message represents a chat message.
 type Message struct {
-	Role    string `json:"role"`
-	Name    string `json:"name,omitempty"`
-	Content string `json:"content"`
+	Role         string        `json:"role"`
+	Name         string        `json:"name,omitempty"`
+	Content      string        `json:"content"`
+	FunctionCall *FunctionCall `json:"function_call,omitempty"`
 }
 
 // Usage holds token usage statistics from the API response.
@@ -49,11 +51,30 @@ type StreamChunk struct {
 	IsComplete   bool
 }
 
+// KnownModels is the fallback list of GigaChat models, used when the
+// /models endpoint is unavailable.
+func KnownModels() []string {
+	return []string{
+		"GigaChat-3-Ultra",
+		"GigaChat-2-Max",
+		"GigaChat-2-Pro",
+		"GigaChat-2",
+	}
+}
+
+// ModelInfo describes an available model from the /models endpoint.
+type ModelInfo struct {
+	ID      string `json:"id"`
+	OwnedBy string `json:"owned_by"`
+}
+
 // Client is the LLM API client for GigaChat.
 type Client struct {
 	httpClient   *http.Client
 	config       *config.LLMConfig
 	tokenManager *auth.TokenManager
+
+	modelMu sync.RWMutex // guards config.Model runtime changes
 }
 
 // NewClient creates a new LLM client.
@@ -78,6 +99,60 @@ func NewClient(cfg *config.LLMConfig) *Client {
 	return client
 }
 
+// SetModel changes the model used for subsequent requests.
+func (c *Client) SetModel(model string) {
+	c.modelMu.Lock()
+	defer c.modelMu.Unlock()
+	c.config.Model = model
+}
+
+// Model returns the currently selected model.
+func (c *Client) Model() string {
+	c.modelMu.RLock()
+	defer c.modelMu.RUnlock()
+	return c.config.Model
+}
+
+// Models returns the list of models available to the account via the
+// /models endpoint.
+func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
+	token, err := c.getAuthToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("auth error: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.config.BaseURL+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("models API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var parsed struct {
+		Data []ModelInfo `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return parsed.Data, nil
+}
+
 // Chat sends a message to GigaChat and returns the response.
 func (c *Client) Chat(ctx context.Context, messages []Message, functions []FunctionDefinition) (*Response, error) {
 	token, err := c.getAuthToken(ctx)
@@ -86,7 +161,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	}
 
 	reqBody := map[string]interface{}{
-		"model":       c.config.Model,
+		"model":       c.Model(),
 		"temperature": c.config.Temperature,
 		"max_tokens":  c.config.MaxTokens,
 		"stream":      false,
@@ -224,7 +299,7 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 	}
 
 	reqBody := map[string]interface{}{
-		"model":       c.config.Model,
+		"model":       c.Model(),
 		"temperature": c.config.Temperature,
 		"max_tokens":  c.config.MaxTokens,
 		"stream":      true,
@@ -256,6 +331,12 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	ch := make(chan StreamChunk, 10)
@@ -387,9 +468,7 @@ func (c *Client) getAuthToken(ctx context.Context) (string, error) {
 // BuildMessages creates the full message list with system prompt.
 func BuildMessages(systemPrompt string, history []Message, userMsg string) []Message {
 	messages := []Message{{Role: "system", Content: systemPrompt}}
-	for _, m := range history {
-		messages = append(messages, m)
-	}
+	messages = append(messages, history...)
 	messages = append(messages, Message{Role: "user", Content: userMsg})
 	return messages
 }

@@ -111,11 +111,17 @@ func (a *Agent) Process(ctx context.Context, userMsg string) (string, error) {
 		}
 
 		// Execute the requested tool and feed the result back to the model.
+		// GigaChat requires the assistant message preceding the function
+		// result to carry the function_call.
 		argsJSON := normalizeArguments(resp.FunctionCall.Arguments)
 
 		messages = append(messages, llm.Message{
 			Role:    "assistant",
 			Content: resp.Content,
+			FunctionCall: &llm.FunctionCall{
+				Name:      resp.FunctionCall.Name,
+				Arguments: argumentsForMessage(resp.FunctionCall.Arguments),
+			},
 		})
 
 		rawResult, err := a.tools.Execute(resp.FunctionCall.Name, argsJSON)
@@ -180,11 +186,17 @@ func (a *Agent) ProcessStream(ctx context.Context, userMsg string, onChunk func(
 		}
 
 		// Execute the requested tool and feed the result back to the model.
+		// GigaChat requires the assistant message preceding the function
+		// result to carry the function_call.
 		argsJSON := normalizeArguments(call.Arguments)
 
 		messages = append(messages, llm.Message{
 			Role:    "assistant",
 			Content: content.String(),
+			FunctionCall: &llm.FunctionCall{
+				Name:      call.Name,
+				Arguments: argumentsForMessage(call.Arguments),
+			},
 		})
 
 		rawResult, err := a.tools.Execute(call.Name, argsJSON)
@@ -360,6 +372,36 @@ func (a *Agent) ResetUsage() {
 	a.usageMu.Lock()
 	defer a.usageMu.Unlock()
 	a.usage = llm.Usage{}
+}
+
+// SetModel switches the LLM model used by the client from now on.
+func (a *Agent) SetModel(model string) {
+	a.client.SetModel(model)
+}
+
+// Model returns the currently selected model.
+func (a *Agent) Model() string {
+	return a.client.Model()
+}
+
+// argumentsForMessage normalizes function call arguments into a form
+// suitable for a function_call message: a JSON object (map) when possible.
+func argumentsForMessage(args interface{}) interface{} {
+	switch v := args.(type) {
+	case string:
+		if v == "" {
+			return map[string]interface{}{}
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(v), &m); err == nil {
+			return m
+		}
+		return v
+	case nil:
+		return map[string]interface{}{}
+	default:
+		return v
+	}
 }
 
 // normalizeArguments converts function call arguments (string, JSON object or

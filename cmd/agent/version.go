@@ -9,7 +9,12 @@ import "fmt"
 // GoReleaser injects the tag version automatically.
 var version = "dev"
 
+// versionString returns the printable version string.
+func versionString() string {
+	return "AI Agent " + version
+}
+
 // printVersion prints the build version.
 func printVersion() {
-	fmt.Printf("AI Agent %s\n", version)
+	fmt.Println(versionString())
 }

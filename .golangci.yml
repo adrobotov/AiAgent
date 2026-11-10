@@ -7,8 +7,10 @@ linters:
   default: standard
   enable:
     - misspell
-    - gofmt
-    - goimports
+  formatters:
+    enable:
+      - gofmt
+      - goimports
   exclusions:
     rules:
       # Tests may have relaxed rules.

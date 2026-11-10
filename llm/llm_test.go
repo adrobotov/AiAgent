@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"agent/config"
@@ -182,6 +183,58 @@ func TestMergeFunctionCalls(t *testing.T) {
 	got = mergeFunctionCalls(&FunctionCall{Name: "a", Arguments: `{"x":`}, &FunctionCall{Arguments: `1}`})
 	if s, _ := got.Arguments.(string); s != `{"x":1}` {
 		t.Fatalf("fragments not concatenated: %v", got.Arguments)
+	}
+}
+
+func TestModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"GigaChat-3-Ultra","owned_by":"sber"},{"id":"GigaChat-2"}]}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(testConfig(srv.URL))
+	models, err := client.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models error: %v", err)
+	}
+	if len(models) != 2 || models[0].ID != "GigaChat-3-Ultra" || models[1].ID != "GigaChat-2" {
+		t.Fatalf("unexpected models: %+v", models)
+	}
+}
+
+func TestSetModel(t *testing.T) {
+	var gotModel atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotModel.Store(req.Model)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(testConfig(srv.URL))
+	if client.Model() != "test-model" {
+		t.Fatalf("initial model = %q", client.Model())
+	}
+
+	client.SetModel("GigaChat-3-Ultra")
+	if client.Model() != "GigaChat-3-Ultra" {
+		t.Fatalf("model after SetModel = %q", client.Model())
+	}
+
+	if _, err := client.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if got := gotModel.Load().(string); got != "GigaChat-3-Ultra" {
+		t.Fatalf("request model = %q, want GigaChat-3-Ultra", got)
 	}
 }
 

@@ -281,13 +281,14 @@ func GetCurrentTime() (string, error) {
 
 // parseArgs parses JSON arguments into the target struct.
 func parseArgs(argsJSON string, target interface{}) error {
+	trimmed := strings.TrimSpace(argsJSON)
 	// If it's already a JSON object, unmarshal directly
-	if strings.HasPrefix(argsJSON, "{") {
-		return json.Unmarshal([]byte(argsJSON), target)
+	if strings.HasPrefix(trimmed, "{") {
+		return json.Unmarshal([]byte(trimmed), target)
 	}
 	// If it's a plain string, wrap it as JSON
-	argsJSON = fmt.Sprintf(`{"value": %q}`, argsJSON)
-	return json.Unmarshal([]byte(argsJSON), target)
+	wrapped := fmt.Sprintf(`{"value": %q}`, trimmed)
+	return json.Unmarshal([]byte(wrapped), target)
 }
 
 // expression parser implements the following grammar:

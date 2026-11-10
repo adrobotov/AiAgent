@@ -158,6 +158,19 @@ func TestProcessToolLoop(t *testing.T) {
 		t.Fatalf("message[3] role=%q name=%q, want function/counter",
 			(*lastMsgs)[3].Role, (*lastMsgs)[3].Name)
 	}
+
+	// Regression: GigaChat requires the assistant message preceding each
+	// function result to carry the function_call.
+	for i, m := range *lastMsgs {
+		if m.Role == "function" {
+			if (*lastMsgs)[i-1].FunctionCall == nil {
+				t.Fatalf("message[%d] precedes a function result but has no function_call", i-1)
+			}
+			if (*lastMsgs)[i-1].FunctionCall.Name != "counter" {
+				t.Fatalf("function_call name = %q, want counter", (*lastMsgs)[i-1].FunctionCall.Name)
+			}
+		}
+	}
 }
 
 // TestProcessNoTool verifies a plain response without tool calls.
