@@ -19,9 +19,6 @@ builds:
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: darwin
-        goarch: 386
     ldflags:
       - -s -w -X main.version={{ .Version }}
 
@@ -56,53 +53,19 @@ changelog:
 
 release:
   github:
-    owner: {{ .Env.GITHUB_OWNER }}
-    name: {{ .Env.GITHUB_REPO }}
+    owner: "{{ .Env.GITHUB_OWNER }}"
+    name: "{{ .Env.GITHUB_REPO }}"
   draft: false
   prerelease: auto
   mode: replace
   header: |
     ## Release {{ .Tag }}
-    
-    {{ range .ExtraRefs }}
-    - {{ . }}
-    {{ end }}
+
+    Full changelog: https://github.com/{{ .Env.GITHUB_OWNER }}/{{ .Env.GITHUB_REPO }}/compare/{{ .PreviousTag }}...{{ .Tag }}
+
   footer: |
     **Full Changelog**: https://github.com/{{ .Env.GITHUB_OWNER }}/{{ .Env.GITHUB_REPO }}/compare/{{ .PreviousTag }}...{{ .Tag }}
-    
-    ### Thank you to our contributors:
-    {{ range .Commits }}
-    - {{ .Author.Name }}
-    {{ end }}
 
-# Binary releases for quick download
-binaries:
-  - id: agent
-    main: ./cmd/agent
-    binary: aiagent
-    extension: ""
-    goos:
-      - linux
-      - windows
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-
-# Source archives
-source:
-  enabled: true
-
-# Homebrew formula
-brews:
-  - name: aiagent
-    repository:
-      owner: {{ .Env.GITHUB_OWNER }}
-      name: homebrew-tap
-    homepage: https://github.com/{{ .Env.GITHUB_OWNER }}/{{ .Env.GITHUB_REPO }}
-    description: "Interactive CLI AI agent for GigaChat API"
-    license: "MIT"
-    test: |
-      system "#{bin}/aiagent --version"
-    install: |
-      bin.install "aiagent"
+  # Source archives
+  sources:
+    - .
