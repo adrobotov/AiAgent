@@ -217,4 +217,7 @@ func TestFileReadSizeLimit(t *testing.T) {
 	if !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
+	// Explicitly remove the large file to avoid Windows cleanup issues.
+	_ = os.Remove(largePath)
 }

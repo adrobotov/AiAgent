@@ -98,6 +98,8 @@ func NewManager(root string, allowedCommands []string, maxResultSize int) *Manag
 	m.Register(NewProcessTool(30*time.Second, allowedCommands))
 	m.Register(NewWebSearchTool())
 	m.Register(NewCodeInterpreterTool())
+	m.Register(NewGitTool(""))
+	m.Register(NewDatabaseTool(100, 30*time.Second))
 	return m
 }
 

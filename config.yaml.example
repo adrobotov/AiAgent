@@ -1,0 +1,42 @@
+# AI Agent Configuration
+# Copy this file to config.yaml and fill in your settings.
+
+llm:
+  base_url: "https://gigachat.devices.sberbank.ru/api/v1"
+  model: "GigaChat-3-Ultra"
+  auth_key: ""
+  temperature: 0.7
+  max_tokens: 8192
+  oauth_scope: "GIGACHAT_API_PERS"
+  oauth_rquid: ""
+
+agent:
+  system_prompt: "You are a helpful assistant."
+  max_turns: 10
+  max_history_messages: 20
+  context_tokens: 8000
+  summarize: false
+  memory: false
+
+tools:
+  root: ""
+  allowed_commands:
+    - go
+    - git
+    - ls
+    - dir
+    - cat
+    - type
+    - echo
+    - pwd
+    - python
+    - node
+    - npm
+    - grep
+    - findstr
+  confirm: "ask"
+  max_result_size: 20000
+  plugins: []
+
+server:
+  port: 8080

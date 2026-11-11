@@ -295,3 +295,44 @@ AiAgent/
 ## Лицензия
 
 MIT
+
+## Создание релиза
+
+### Автоматический релиз через Git Tag
+
+```bash
+# Linux/macOS
+./scripts/create-release.sh v1.0.0
+
+# Windows (PowerShell)
+.\scripts\create-release.ps1 v1.0.0
+
+# Или через Makefile
+make tag-release VERSION=v1.0.0
+```
+
+Скрипт:
+1. Собирает проект
+2. Создаёт git tag
+3. Пушит тег в remote
+4. GoReleaser в CI автоматически создаст GitHub Release с артефактами
+
+### Ручной релиз
+
+```bash
+# Создаём тег
+git tag -a v1.0.0 -m "Release v1.0.0"
+git push origin v1.0.0
+
+# GoReleaser в CI создаст release автоматически
+```
+
+### Артефакты релиза
+
+GoReleaser создаст:
+- **tar.gz** (linux/darwin) / **zip** (windows) с бинарником и документацией
+- **checksums.txt** с SHA256 суммами
+- **source archive** с исходным кодом
+- **Homebrew formula** (опционально)
+
+Проверить артефакты: https://github.com/{owner}/{repo}/releases

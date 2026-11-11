@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt lint clean coverage release version
+.PHONY: build run test vet fmt lint clean coverage release version tag-release
 
 VERSION ?= dev
 
@@ -13,6 +13,17 @@ version:
 # Local release build (requires https://goreleaser.com).
 release:
 	goreleaser release --snapshot --clean
+
+# Create and push a git tag for a new release.
+# Usage: make tag-release VERSION=v1.2.3
+tag-release:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Error: VERSION is required. Usage: make tag-release VERSION=v1.2.3"; \
+		exit 1; \
+	fi
+	git tag -a "$(VERSION)" -m "Release $(VERSION)"
+	git push origin "$(VERSION)"
+	@echo "Tag $(VERSION) pushed. GoReleaser will create the GitHub release automatically."
 
 # Run the agent.
 run:

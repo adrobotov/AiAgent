@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"agent/agent"
@@ -67,6 +69,11 @@ func commandTable() []command {
 				fmt.Println("\n✓ New conversation started")
 				return false
 			},
+		},
+		{
+			pattern: regexp.MustCompile(`^/multi$`),
+			help:    "/multi             - Multi-line input mode (type /end on a new line to finish)",
+			handler: (*repl).handleMulti,
 		},
 		{
 			pattern: regexp.MustCompile(`^/conversations?$`),
@@ -253,6 +260,11 @@ func commandTable() []command {
 			help:    "/vision <path> <q> - Analyze an image",
 			handler: (*repl).handleVision,
 		},
+		{
+			pattern: regexp.MustCompile(`^/pipeline$`),
+			help:    "/pipeline          - Show multi-agent pipeline status",
+			handler: (*repl).handlePipeline,
+		},
 	}
 }
 
@@ -389,6 +401,79 @@ func (r *repl) saveMessage(role, content string) {
 		Role:    role,
 		Content: content,
 	})
+}
+
+// sessionData holds the state needed to resume a session.
+type sessionData struct {
+	ConvID  int64         `json:"conv_id"`
+	History []llm.Message `json:"history"`
+	Model   string        `json:"model"`
+	Usage   llm.Usage     `json:"usage"`
+}
+
+// sessionDir returns the directory where the session file is stored.
+func sessionDir() string {
+	dir := history.ConfigDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return ""
+	}
+	return dir
+}
+
+// saveSession persists the current conversation state to disk.
+func (r *repl) saveSession() {
+	dir := sessionDir()
+	if dir == "" {
+		return
+	}
+
+	data := sessionData{
+		ConvID:  r.convID,
+		History: r.ag.History(),
+		Model:   r.ag.Model(),
+		Usage:   r.ag.Usage(),
+	}
+
+	buf, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dir, sessionFile)
+	_ = os.WriteFile(path, buf, 0600)
+}
+
+// restoreSession loads the conversation state from a saved session file.
+// Returns true if a session was restored.
+func (r *repl) restoreSession() bool {
+	dir := sessionDir()
+	if dir == "" {
+		return false
+	}
+
+	path := filepath.Join(dir, sessionFile)
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+
+	var data sessionData
+	if err := json.Unmarshal(buf, &data); err != nil {
+		return false
+	}
+
+	if data.ConvID <= 0 || len(data.History) == 0 {
+		return false
+	}
+
+	r.convID = data.ConvID
+	if r.store != nil {
+		r.store.SetCurrentConversation(data.ConvID)
+	}
+	r.ag.LoadHistory(data.History)
+	r.ag.SetModel(data.Model)
+
+	fmt.Printf("✓ Restored conversation #%d (%d messages)\n", data.ConvID, len(data.History))
+	return true
 }
 
 // handleChat sends the input to the agent and shows a loading animation
@@ -916,7 +1001,169 @@ func (r *repl) handleVision(input string) bool {
 	}
 
 	fmt.Println("\n" + r.ag.Renderer().Render(resp.Content) + "\n")
+
+	// Save user question and assistant response to history.
+	r.saveMessage("user", fmt.Sprintf("[Image: %s] %s", imagePath, question))
+	r.saveMessage("assistant", resp.Content)
+
 	return false
+}
+
+// handleMulti enters multi-line input mode. Lines are accumulated until
+// a line containing only "/end" is received. The accumulated text is then
+// sent to the agent as a single message.
+func (r *repl) handleMulti(_ string) bool {
+	fmt.Println("Multi-line mode: type your message (type '/end' on its own line to finish)")
+	var lines []string
+	for {
+		fmt.Print("... ")
+		if !r.scanner.Scan() {
+			return true
+		}
+		line := r.scanner.Text()
+		if line == "/end" {
+			break
+		}
+		lines = append(lines, line)
+	}
+
+	fullMessage := strings.Join(lines, "\n")
+	if strings.TrimSpace(fullMessage) == "" {
+		fmt.Println("(empty input, ignored)")
+		return false
+	}
+
+	// Dispatch the accumulated message through the normal chat handler.
+	r.handleChat(fullMessage)
+	return false
+}
+
+// handlePipeline shows the multi-agent pipeline visualization.
+func (r *repl) handlePipeline(input string) bool {
+	// Parse the task from the input (e.g., /pipeline <task>)
+	task := strings.TrimSpace(strings.TrimPrefix(input, "/pipeline"))
+	if task == "" {
+		fmt.Println("Usage: /pipeline <task>")
+		fmt.Println("Runs the multi-agent pipeline: planner → executor → critic → (optional) revision")
+		return false
+	}
+
+	fmt.Println("\n🔄 Running multi-agent pipeline...")
+	fmt.Println("┌─────────────────────────────────────────────────────────┐")
+	fmt.Printf("│ Task: %s │\n", truncate(task, 47))
+
+	var answer strings.Builder
+	var criticVerdict, criticNotes string
+
+	// Stage 1: Planner
+	fmt.Println("├─────────────────────────────────────────────────────────┤")
+	fmt.Println("│ [1/4] 📋 Planner: decomposing task...")
+	steps, err := r.ag.Plan(context.Background(), task)
+	if err != nil {
+		fmt.Printf("│ ❌ Planner failed: %v\n", err)
+		fmt.Println("└─────────────────────────────────────────────────────────┘")
+		return false
+	}
+	fmt.Printf("│ ✅ Plan generated: %d steps\n", len(steps))
+	for i, s := range steps {
+		fmt.Printf("│    %d. %s\n", i+1, truncate(s, 40))
+	}
+
+	// Stage 2: Executor
+	fmt.Println("├─────────────────────────────────────────────────────────┤")
+	fmt.Println("│ [2/4] 🤖 Executor: running plan...")
+	type execProgress struct {
+		done, total int
+		step        string
+	}
+	var progChan chan execProgress
+	var wg sync.WaitGroup
+	progChan = make(chan execProgress, 10)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		result, err := r.ag.ExecutePlan(context.Background(), steps, func(done, total int, step string) {
+			progChan <- execProgress{done, total, step}
+		})
+		if err != nil {
+			fmt.Printf("│ ❌ Executor failed at step %d: %v\n", result.FailedAt+1, err)
+		} else {
+			for i, res := range result.Results {
+				fmt.Printf("│    Step %d/%d: %s\n", i+1, len(result.Steps), truncate(res, 50))
+			}
+		}
+		close(progChan)
+	}()
+
+	for p := range progChan {
+		fmt.Printf("│    ⏳ Step %d/%d: %s\n", p.done+1, p.total, truncate(p.step, 40))
+	}
+	wg.Wait()
+
+	// Stage 3: Critic
+	fmt.Println("├─────────────────────────────────────────────────────────┤")
+	fmt.Println("│ [3/4] 👁️ Critic: reviewing answer...")
+	// Reconstruct answer for critic
+	for i, s := range steps {
+		fmt.Fprintf(&answer, "%d. %s\n", i+1, s)
+	}
+	critResp, err := r.ag.Client().Chat(context.Background(), []llm.Message{
+		{Role: "system", Content: "You are a quality reviewer. Review the assistant's answer. Reply with APPROVED or REVISION NEEDED."},
+		{Role: "user", Content: fmt.Sprintf("Task: %s\n\nAnswer:\n%s", task, answer.String())},
+	}, nil)
+	if err != nil {
+		fmt.Printf("│ ⚠️  Critic unavailable: %v\n", err)
+		criticVerdict = "APPROVED"
+		criticNotes = "(critic unavailable)"
+	} else {
+		criticVerdict, criticNotes = parseCriticVerdict(critResp.Content)
+		if criticVerdict == "APPROVED" {
+			fmt.Println("│ ✅ APPROVED")
+		} else {
+			fmt.Printf("│ ⚠️  REVISION NEEDED: %s\n", truncate(criticNotes, 45))
+		}
+	}
+
+	// Stage 4: Revision (optional)
+	if criticVerdict == "REVISION NEEDED" {
+		fmt.Println("├─────────────────────────────────────────────────────────┤")
+		fmt.Println("│ [4/4] ✏️  Revision: improving answer...")
+		revResp, err := r.ag.Client().Chat(context.Background(), []llm.Message{
+			{Role: "system", Content: "You are a helpful assistant. Improve the answer according to the reviewer's feedback."},
+			{Role: "user", Content: fmt.Sprintf("Task: %s\n\nDraft:\n%s\n\nFeedback: %s", task, answer.String(), criticNotes)},
+		}, nil)
+		if err == nil {
+			fmt.Printf("│ ✅ Revised: %s\n", truncate(revResp.Content, 50))
+			answer.Reset()
+			answer.WriteString(revResp.Content)
+		}
+	}
+
+	fmt.Println("└─────────────────────────────────────────────────────────┘")
+	fmt.Printf("\n📝 Final answer:\n%s\n\n", r.ag.Renderer().Render(answer.String()))
+
+	// Save to history
+	r.saveMessage("user", fmt.Sprintf("/pipeline: %s", task))
+	r.saveMessage("assistant", answer.String())
+
+	return false
+}
+
+// parseCriticVerdict extracts the verdict from critic content.
+func parseCriticVerdict(content string) (verdict, notes string) {
+	upper := strings.ToUpper(content)
+	if idx := strings.Index(upper, "REVISION NEEDED"); idx >= 0 {
+		notes := strings.TrimSpace(content[idx+len("REVISION NEEDED"):])
+		notes = strings.TrimPrefix(notes, ":")
+		return "REVISION NEEDED", strings.TrimSpace(notes)
+	}
+	if idx := strings.Index(upper, "APPROVED"); idx >= 0 {
+		notes := strings.TrimSpace(content[idx+len("APPROVED"):])
+		notes = strings.TrimPrefix(notes, ":")
+		return "APPROVED", strings.TrimSpace(notes)
+	}
+	return "APPROVED", content
 }
 
 // showPreviousConversations displays a list of previous conversations on startup.
@@ -985,4 +1232,16 @@ func printHelp() {
 		fmt.Println("  " + cmd.help)
 	}
 	fmt.Println()
+}
+
+// truncate shortens a string to max runes, appending "..." if truncated.
+func truncate(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max < 4 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
 }

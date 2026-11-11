@@ -11,6 +11,9 @@ import (
 	"agent/history"
 )
 
+// sessionFile is the name of the file used to persist the current session.
+const sessionFile = "session.json"
+
 func main() {
 	// --version prints the build version and exits.
 	for _, arg := range os.Args[1:] {
@@ -76,8 +79,17 @@ func main() {
 	}()
 
 	r := newRepl(cfg, ag, store)
+
+	// Restore session if available.
+	if r.restoreSession() {
+		fmt.Println("✓ Session restored from previous run")
+	}
+
 	r.showPreviousConversations()
 	r.Run()
+
+	// Save session on exit.
+	r.saveSession()
 }
 
 func printBanner() {
