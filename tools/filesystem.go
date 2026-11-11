@@ -153,20 +153,19 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 			return "", fmt.Errorf("invalid root path: %w", err)
 		}
 
-		// Resolve the requested path relative to root
-		var resolved string
-		if filepath.IsAbs(path) {
-			resolved = path
-		} else {
-			resolved = filepath.Join(root, path)
-		}
-		resolved = filepath.Clean(resolved)
-
 		// Resolve symlinks in the root to prevent symlink-based escapes
 		realRoot, err := filepath.EvalSymlinks(root)
 		if err != nil {
-			// If we can't resolve symlinks, fall back to standard validation
 			realRoot = root
+		}
+
+		var resolved string
+		if filepath.IsAbs(path) {
+			// Absolute path: check if it's within root
+			resolved = filepath.Clean(path)
+		} else {
+			// Relative path: join with root
+			resolved = filepath.Clean(filepath.Join(root, path))
 		}
 
 		// Ensure the resolved path is within the root
@@ -178,21 +177,10 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 			return "", fmt.Errorf("path outside root directory")
 		}
 
-		// Also check the original path (before symlink resolution)
-		safePath := filepath.Clean(path)
-		if !filepath.IsAbs(safePath) {
-			safePath = filepath.Join(root, safePath)
-		}
-		safePath = filepath.Clean(safePath)
-		relSafe, _ := filepath.Rel(root, safePath)
-		if strings.HasPrefix(relSafe, ".."+string(filepath.Separator)) || relSafe == ".." {
-			return "", fmt.Errorf("path outside root directory")
-		}
-
 		return resolved, nil
 	}
 
-	// No root restriction — still resolve symlinks and clean path
+	// No root restriction — still clean and resolve the path
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
 		abs, err := filepath.Abs(path)
@@ -201,7 +189,7 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 		}
 		return abs, nil
 	}
-	return filepath.Clean(path), nil
+	return path, nil
 }
 
 // readFile reads a file and returns its contents.
