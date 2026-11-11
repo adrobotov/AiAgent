@@ -99,7 +99,7 @@ func fetchLiveWeather(location string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("forecast request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("forecast API status %d", resp.StatusCode)
@@ -141,7 +141,7 @@ func fetchWttrWeather(location string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("wttr.in request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("wttr.in status %d", resp.StatusCode)
