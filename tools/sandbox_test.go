@@ -13,7 +13,7 @@ import (
 // are rejected.
 func TestFileSystemToolRootRestriction(t *testing.T) {
 	root := t.TempDir()
-	tool := NewFileSystemTool(root)
+	tool := NewFileSystemTool(root, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	// Write inside the root — allowed.
@@ -47,7 +47,7 @@ func TestFileSystemToolConfirmation(t *testing.T) {
 	target := filepath.Join(root, "file.txt")
 
 	// Policy: never — write must be denied.
-	tool := NewFileSystemTool(root)
+	tool := NewFileSystemTool(root, false)
 	tool.SetPolicy(Policy{Mode: ConfirmNever})
 	_, err := tool.Execute(fmt.Sprintf(`{"action":"write","path":%q,"content":"x"}`, target))
 	if err == nil || !strings.Contains(err.Error(), "not approved") {
@@ -82,7 +82,7 @@ func TestFileSystemToolConfirmation(t *testing.T) {
 
 // TestProcessToolWhitelist verifies only whitelisted commands can be executed.
 func TestProcessToolWhitelist(t *testing.T) {
-	tool := NewProcessTool(5*time.Second, []string{"go"})
+	tool := NewProcessTool(5*time.Second, []string{"go"}, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	if _, err := tool.Execute(`{"action":"exec","command":"not-a-real-cmd-xyz"}`); err == nil ||
@@ -98,7 +98,7 @@ func TestProcessToolWhitelist(t *testing.T) {
 // TestProcessToolDenyByDefault verifies an explicitly empty whitelist allows
 // no commands at all.
 func TestProcessToolDenyByDefault(t *testing.T) {
-	tool := NewProcessTool(5*time.Second, []string{})
+	tool := NewProcessTool(5*time.Second, []string{}, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	_, err := tool.Execute(`{"action":"exec","command":"echo","args":"hi"}`)
@@ -109,7 +109,7 @@ func TestProcessToolDenyByDefault(t *testing.T) {
 
 // TestManagerResultTruncation verifies oversized tool results are truncated.
 func TestManagerResultTruncation(t *testing.T) {
-	m := NewManager(t.TempDir(), []string{}, 50)
+	m := NewManager(t.TempDir(), []string{}, 50, "", false)
 
 	big := strings.Repeat("x", 500)
 	res, err := m.Execute("echo", fmt.Sprintf(`{"message":%q}`, big))
@@ -123,7 +123,7 @@ func TestManagerResultTruncation(t *testing.T) {
 
 // TestManagerConfirmationPolicy verifies SetPolicy reaches Confirmable tools.
 func TestManagerConfirmationPolicy(t *testing.T) {
-	m := NewManager(t.TempDir(), []string{}, 0)
+	m := NewManager(t.TempDir(), []string{}, 0, "", false)
 	m.SetPolicy(Policy{Mode: ConfirmNever})
 
 	// filesystem write is dangerous — must be denied by policy.
@@ -132,7 +132,7 @@ func TestManagerConfirmationPolicy(t *testing.T) {
 	// execute write to a path inside that root.
 	fsRoot := ""
 	// Recreate manager with explicit root for clarity.
-	m = NewManager(root, []string{}, 0)
+	m = NewManager(root, []string{}, 0, "", false)
 	m.SetPolicy(Policy{Mode: ConfirmNever})
 	fsRoot = root
 
@@ -150,26 +150,9 @@ func TestManagerConfirmationPolicy(t *testing.T) {
 	}
 }
 
-// TestWeatherDescription covers WMO code mapping.
-func TestWeatherDescription(t *testing.T) {
-	cases := map[int]string{
-		0:  "Ясно",
-		2:  "Переменная облачность",
-		61: "Дождь",
-		95: "Гроза",
-		99: "Гроза",
-		42: "Код погоды 42",
-	}
-	for code, want := range cases {
-		if got := weatherDescription(code); got != want {
-			t.Errorf("weatherDescription(%d) = %q, want %q", code, got, want)
-		}
-	}
-}
-
 // TestCommandInjectionProtection verifies dangerous shell patterns are rejected.
 func TestCommandInjectionProtection(t *testing.T) {
-	tool := NewProcessTool(5*time.Second, []string{"echo"})
+	tool := NewProcessTool(5*time.Second, []string{"echo"}, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	injectionCases := []string{
@@ -191,7 +174,7 @@ func TestCommandInjectionProtection(t *testing.T) {
 // TestFileReadSizeLimit verifies oversized files are rejected.
 func TestFileReadSizeLimit(t *testing.T) {
 	root := t.TempDir()
-	tool := NewFileSystemTool(root)
+	tool := NewFileSystemTool(root, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	// Create a file larger than MaxReadFileSize.
@@ -220,4 +203,157 @@ func TestFileReadSizeLimit(t *testing.T) {
 
 	// Explicitly remove the large file to avoid Windows cleanup issues.
 	_ = os.Remove(largePath)
+}
+
+// TestCreateFile verifies file creation and error on existing file.
+func TestCreateFile(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root, false)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create a new file
+	_, err := tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"hello"}`, "test.txt"))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Try to create again — should fail
+	_, err = tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"hello"}`, "test.txt"))
+	if err == nil {
+		t.Fatal("expected error for existing file")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestAppendFile verifies appending to existing file.
+func TestAppendFile(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root, false)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create initial file
+	_, err := tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"line1\nline2\n"}`, "append.txt"))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Append to file
+	_, err = tool.Execute(fmt.Sprintf(`{"action":"append","path":%q,"content":"line3\n"}`, "append.txt"))
+	if err != nil {
+		t.Fatalf("append failed: %v", err)
+	}
+
+	// Verify content
+	data, err := os.ReadFile(filepath.Join(root, "append.txt"))
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(data) != "line1\nline2\nline3\n" {
+		t.Fatalf("unexpected content: %q", string(data))
+	}
+}
+
+// TestInsertLine verifies inserting at specific line.
+func TestInsertLine(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root, false)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create initial file
+	_, err := tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"first\nthird\n"}`, "insert.txt"))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Insert at line 2
+	_, err = tool.Execute(fmt.Sprintf(`{"action":"insert","path":%q,"line":2,"content":"second"}`, "insert.txt"))
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	// Verify content
+	data, err := os.ReadFile(filepath.Join(root, "insert.txt"))
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(data) != "first\nsecond\nthird" {
+		t.Fatalf("unexpected content: %q", string(data))
+	}
+}
+
+// TestReplaceText verifies text replacement.
+func TestReplaceText(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root, false)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create initial file
+	_, err := tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"hello world hello"}`, "replace.txt"))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Replace text
+	_, err = tool.Execute(fmt.Sprintf(`{"action":"replace","path":%q,"search":"hello","replace":"hi"}`, "replace.txt"))
+	if err != nil {
+		t.Fatalf("replace failed: %v", err)
+	}
+
+	// Verify content
+	data, err := os.ReadFile(filepath.Join(root, "replace.txt"))
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(data) != "hi world hi" {
+		t.Fatalf("unexpected content: %q", string(data))
+	}
+}
+
+// TestSearchFile verifies searching in file.
+func TestSearchFile(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root, false)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create initial file
+	_, err := tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"line one\nline two\nno match"}`, "search.txt"))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Search for pattern
+	result, err := tool.Execute(fmt.Sprintf(`{"action":"search","path":%q,"search":"line"}`, "search.txt"))
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if !strings.Contains(result, "Found 2 matches") {
+		t.Fatalf("unexpected result: %s", result)
+	}
+	if !strings.Contains(result, "1: line one") {
+		t.Fatalf("missing match: %s", result)
+	}
+}
+
+// TestSearchFileRegex verifies regex search in file.
+func TestSearchFileRegex(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root, false)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create initial file
+	_, err := tool.Execute(fmt.Sprintf(`{"action":"create","path":%q,"content":"abc123\ndef456\nghi789"}`, "regex.txt"))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Search with regex
+	result, err := tool.Execute(fmt.Sprintf(`{"action":"search","path":%q,"search":"\\d{3}"}`, "regex.txt"))
+	if err != nil {
+		t.Fatalf("regex search failed: %v", err)
+	}
+	if !strings.Contains(result, "Found 3 matches") {
+		t.Fatalf("unexpected result: %s", result)
+	}
 }

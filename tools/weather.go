@@ -3,7 +3,6 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,274 +11,180 @@ import (
 )
 
 const (
-	weatherTimeout   = 10 * time.Second
-	weatherCacheTTL  = 10 * time.Minute
-	geocodingBaseURL = "https://geocoding-api.open-meteo.com/v1/search"
-	forecastBaseURL  = "https://api.open-meteo.com/v1/forecast"
+	weatherTimeout  = 10 * time.Second
+	weatherCacheTTL = 10 * time.Minute
+	weatherAPIBase  = "http://api.weatherapi.com/v1"
 )
 
-// weatherCacheEntry is a cached weather response with expiration.
-type weatherCacheEntry struct {
-	data    string
-	expires time.Time
+// WeatherTool provides weather information via WeatherAPI.com.
+type WeatherTool struct {
+	// APIKey is the WeatherAPI.com key.
+	// If empty, mock data is returned.
+	APIKey string
+
+	mu     sync.RWMutex
+	cache  map[string]weatherCacheEntry
+	client *http.Client
 }
 
-var (
-	weatherCache  sync.Map // location (lowercase) -> weatherCacheEntry
-	weatherClient = &http.Client{Timeout: weatherTimeout}
-)
+type weatherCacheEntry struct {
+	data      string
+	expiresAt time.Time
+}
 
-// FetchWeather returns current weather for a location using the free
-// Open-Meteo API (no API key required). Results are cached for 10 minutes.
-// If the API is unreachable, falls back to mock data with a note.
-func FetchWeather(argsJSON string) (string, error) {
+// NewWeatherTool creates a new weather tool.
+func NewWeatherTool(apiKey string) *WeatherTool {
+	return &WeatherTool{
+		APIKey: apiKey,
+		cache:  make(map[string]weatherCacheEntry),
+		client: &http.Client{
+			Timeout: weatherTimeout,
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+			},
+		},
+	}
+}
+
+// Name returns the tool name.
+func (t *WeatherTool) Name() string { return "weather" }
+
+// Description returns the tool description.
+func (t *WeatherTool) Description() string {
+	return "Returns current weather for a location using WeatherAPI.com."
+}
+
+// Parameters returns the tool parameters schema.
+func (t *WeatherTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"location": map[string]interface{}{
+				"type":        "string",
+				"description": "City or location name (e.g. 'Moscow', 'London').",
+			},
+		},
+		"required": []string{"location"},
+	}
+}
+
+// Execute executes the weather query.
+func (t *WeatherTool) Execute(argsJSON string) (string, error) {
 	var args struct {
 		Location string `json:"location"`
 	}
 	if err := parseArgs(argsJSON, &args); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(args.Location) == "" {
+
+	location := strings.TrimSpace(args.Location)
+	if location == "" {
 		return "", fmt.Errorf("location is required")
 	}
 
-	key := strings.ToLower(strings.TrimSpace(args.Location))
+	key := strings.ToLower(location)
 
 	// Check cache
-	if e, ok := weatherCache.Load(key); ok {
-		entry := e.(weatherCacheEntry)
-		if time.Now().Before(entry.expires) {
-			return entry.data, nil
-		}
-		weatherCache.Delete(key)
+	t.mu.RLock()
+	if entry, ok := t.cache[key]; ok && time.Now().Before(entry.expiresAt) {
+		t.mu.RUnlock()
+		return entry.data, nil
 	}
+	t.mu.RUnlock()
 
-	// Primary source: Open-Meteo.
-	data, err := fetchLiveWeather(key)
+	// Fetch from API
+	data, err := t.fetchWeather(location)
 	if err != nil {
-		// Fallback source: wttr.in (also keyless).
-		if data2, err2 := fetchWttrWeather(args.Location); err2 == nil {
-			weatherCache.Store(key, weatherCacheEntry{
-				data:    data2,
-				expires: time.Now().Add(weatherCacheTTL),
-			})
-			return data2, nil
-		}
-		// Last resort: mock data so the agent still gets a usable answer.
-		return mockWeather(args.Location, err), nil
+		return mockWeather(location, err), nil
 	}
 
-	weatherCache.Store(key, weatherCacheEntry{
-		data:    data,
-		expires: time.Now().Add(weatherCacheTTL),
-	})
+	// Cache the result
+	t.mu.Lock()
+	t.cache[key] = weatherCacheEntry{
+		data:      data,
+		expiresAt: time.Now().Add(weatherCacheTTL),
+	}
+	t.mu.Unlock()
+
 	return data, nil
 }
 
-// fetchLiveWeather queries the Open-Meteo geocoding + forecast APIs.
-func fetchLiveWeather(location string) (string, error) {
-	lat, lon, name, err := geocode(location)
+// fetchWeather queries WeatherAPI.com for current weather.
+func (t *WeatherTool) fetchWeather(location string) (string, error) {
+	if t.APIKey == "" {
+		return "", fmt.Errorf("weather API key not configured")
+	}
+
+	encodedLocation := url.QueryEscape(location)
+	apiURL := fmt.Sprintf("%s/current.json?key=%s&q=%s&lang=ru",
+		weatherAPIBase, t.APIKey, encodedLocation)
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", err
 	}
 
-	fcURL := fmt.Sprintf(
-		"%s?latitude=%f&longitude=%f&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m&timezone=auto",
-		forecastBaseURL,
-		lat,
-		lon,
-	)
-
-	req, err := http.NewRequest(http.MethodGet, fcURL, nil)
+	resp, err := t.client.Do(req)
 	if err != nil {
-		return "", err
-	}
-
-	resp, err := weatherClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("forecast request: %w", err)
+		return "", fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("forecast API status %d", resp.StatusCode)
+		return "", fmt.Errorf("weather API returned status %d", resp.StatusCode)
 	}
 
-	var fc struct {
+	var result struct {
+		Location struct {
+			Name    string `json:"name"`
+			Country string `json:"country"`
+			TzID    string `json:"tz_id"`
+		} `json:"location"`
 		Current struct {
-			Temperature float64 `json:"temperature_2m"`
-			WeatherCode int     `json:"weather_code"`
-			WindSpeed   float64 `json:"wind_speed_10m"`
+			TempC       float64 `json:"temp_c"`
+			WeatherDesc []struct {
+				Value string `json:"text"`
+			} `json:"weather_desc"`
+			WindKph  float64 `json:"wind_kph"`
+			WindDir  string  `json:"wind_dir"`
+			Humidity int     `json:"humidity"`
+			VisKm    float64 `json:"vis_km"`
 		} `json:"current"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&fc); err != nil {
-		return "", fmt.Errorf("parse forecast: %w", err)
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	country := result.Location.Country
+	if country != "" {
+		country = " (" + country + ")"
+	}
+
+	desc := "Неизвестно"
+	if len(result.Current.WeatherDesc) > 0 {
+		desc = result.Current.WeatherDesc[0].Value
 	}
 
 	return fmt.Sprintf(
-		"Погода в %s: %.1f°C, %s, ветер %.1f м/с (источник: Open-Meteo)",
-		name, fc.Current.Temperature,
-		weatherDescription(fc.Current.WeatherCode),
-		fc.Current.WindSpeed,
+		"Погода в %s%s: %.1f°C, %s, ветер %.1f км/ч (%s), влажность %d%%, видимость %.1f км",
+		result.Location.Name, country,
+		result.Current.TempC, desc,
+		result.Current.WindKph, result.Current.WindDir,
+		result.Current.Humidity, result.Current.VisKm,
 	), nil
-}
-
-// wttrBaseURL is the fallback weather service (keyless).
-const wttrBaseURL = "https://wttr.in"
-
-// fetchWttrWeather fetches current weather from wttr.in (JSON format).
-func fetchWttrWeather(location string) (string, error) {
-	reqURL := fmt.Sprintf("%s/%s?format=j1", wttrBaseURL, url.QueryEscape(location))
-
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "curl/8.0")
-
-	resp, err := weatherClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("wttr.in request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("wttr.in status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read wttr.in response: %w", err)
-	}
-
-	name, line, err := parseWttr(body)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("Погода в %s: %s (источник: wttr.in)", name, line), nil
-}
-
-// parseWttr extracts a human-readable weather line from the wttr.in JSON
-// (format=j1) response.
-func parseWttr(data []byte) (name, line string, err error) {
-	var wttr struct {
-		NearestArea []struct {
-			AreaName []struct {
-				Value string `json:"value"`
-			} `json:"areaName"`
-			Country []struct {
-				Value string `json:"value"`
-			} `json:"country"`
-		} `json:"nearest_area"`
-		CurrentCondition []struct {
-			TempC       string `json:"temp_C"`
-			WindspeedKm string `json:"windspeedKmph"`
-			WeatherDesc []struct {
-				Value string `json:"value"`
-			} `json:"weatherDesc"`
-		} `json:"current_condition"`
-	}
-	if err := json.Unmarshal(data, &wttr); err != nil {
-		return "", "", fmt.Errorf("parse wttr.in response: %w", err)
-	}
-	if len(wttr.CurrentCondition) == 0 {
-		return "", "", fmt.Errorf("wttr.in response has no current condition")
-	}
-
-	cc := wttr.CurrentCondition[0]
-	desc := "unknown"
-	if len(cc.WeatherDesc) > 0 {
-		desc = strings.TrimSpace(cc.WeatherDesc[0].Value)
-	}
-
-	name = "unknown location"
-	if len(wttr.NearestArea) > 0 && len(wttr.NearestArea[0].AreaName) > 0 {
-		name = wttr.NearestArea[0].AreaName[0].Value
-		if len(wttr.NearestArea[0].Country) > 0 {
-			name += ", " + wttr.NearestArea[0].Country[0].Value
-		}
-	}
-
-	wind := cc.WindspeedKm
-	if wind == "" {
-		wind = "0"
-	}
-
-	return name, fmt.Sprintf(
-		"%s°C, %s, ветер %s км/ч",
-		cc.TempC, desc, wind,
-	), nil
-}
-
-// geocode resolves a location name to coordinates via Open-Meteo geocoding.
-func geocode(location string) (lat, lon float64, name string, err error) {
-	gURL := fmt.Sprintf("%s?name=%s&count=1&language=ru&format=json",
-		geocodingBaseURL, url.QueryEscape(location))
-
-	req, err := http.NewRequest(http.MethodGet, gURL, nil)
-	if err != nil {
-		return 0, 0, "", err
-	}
-
-	resp, err := weatherClient.Do(req)
-	if err != nil {
-		return 0, 0, "", fmt.Errorf("geocoding request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, 0, "", fmt.Errorf("geocoding API status %d", resp.StatusCode)
-	}
-
-	var geo struct {
-		Results []struct {
-			Name      string  `json:"name"`
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
-		} `json:"results"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&geo); err != nil {
-		return 0, 0, "", fmt.Errorf("parse geocoding: %w", err)
-	}
-
-	if len(geo.Results) == 0 {
-		return 0, 0, "", fmt.Errorf("location %q not found", location)
-	}
-
-	r := geo.Results[0]
-	return r.Latitude, r.Longitude, r.Name, nil
-}
-
-// weatherDescription maps WMO weather codes to human-readable descriptions.
-func weatherDescription(code int) string {
-	switch {
-	case code == 0:
-		return "Ясно"
-	case code >= 1 && code <= 3:
-		return "Переменная облачность"
-	case code == 45 || code == 48:
-		return "Туман"
-	case code >= 51 && code <= 57:
-		return "Морось"
-	case code >= 61 && code <= 67:
-		return "Дождь"
-	case code >= 71 && code <= 77:
-		return "Снег"
-	case code >= 80 && code <= 82:
-		return "Ливни"
-	case code == 85 || code == 86:
-		return "Снегопад"
-	case code == 95 || code == 96 || code == 99:
-		return "Гроза"
-	default:
-		return fmt.Sprintf("Код погоды %d", code)
-	}
 }
 
 // mockWeather returns mock data when the live API is unavailable.
 func mockWeather(location string, cause error) string {
 	return fmt.Sprintf(
-		"Погода в %s: +12°C, Переменная облачность (данные недоступны: %v — показаны моковые данные)",
+		"Погода в %s: данные недоступны (попробуйте настроить API ключ в config.yaml: weather_api_key: \"ваш_ключ\"). Ошибка: %v",
 		location, cause,
 	)
+}
+
+// FetchWeather is a convenience function for weather queries.
+func FetchWeather(argsJSON string) (string, error) {
+	tool := NewWeatherTool("")
+	return tool.Execute(argsJSON)
 }

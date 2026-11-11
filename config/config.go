@@ -38,12 +38,20 @@ type ToolsConfig struct {
 	//   never  - always deny dangerous ops
 	Confirm string `yaml:"confirm"`
 
+	// AutoConfirm enables automatic confirmation for all tool operations.
+	// When true, dangerous operations (write, delete, execute) are allowed
+	// without user interaction. Useful for autonomous agent mode.
+	AutoConfirm bool `yaml:"auto_confirm"`
+
 	// MaxResultSize limits the size of a tool result fed back to the LLM
 	// (in characters). Oversized results are truncated.
 	MaxResultSize int `yaml:"max_result_size"`
 
 	// Plugins is a list of external tool plugin commands (subprocess protocol).
 	Plugins []string `yaml:"plugins"`
+
+	// WeatherAPIKey is the API key for WeatherAPI.com.
+	WeatherAPIKey string `yaml:"weather_api_key"`
 }
 
 // LLMConfig holds LLM provider settings.
@@ -192,6 +200,12 @@ func applyEnvOverrides(cfg *Config) {
 		if t, err := strconv.Atoi(v); err == nil && t > 0 {
 			cfg.Tools.MaxResultSize = t
 		}
+	}
+	if v := os.Getenv("AGENT_TOOLS_AUTO_CONFIRM"); v != "" {
+		cfg.Tools.AutoConfirm = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	}
+	if v := os.Getenv("AGENT_WEATHER_API_KEY"); v != "" {
+		cfg.Tools.WeatherAPIKey = v
 	}
 
 	// Context settings

@@ -80,7 +80,11 @@ type Client struct {
 // NewClient creates a new LLM client.
 func NewClient(cfg *config.LLMConfig) *Client {
 	client := &Client{
-		httpClient: &http.Client{},
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				ForceAttemptHTTP2: false,
+			},
+		},
 		config:     cfg,
 	}
 

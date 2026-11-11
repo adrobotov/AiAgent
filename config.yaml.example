@@ -35,8 +35,10 @@ tools:
     - grep
     - findstr
   confirm: "ask"
+  auto_confirm: false
   max_result_size: 20000
   plugins: []
+  weather_api_key: ""
 
 server:
   port: 8080

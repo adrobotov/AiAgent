@@ -56,7 +56,7 @@ func TestGetCurrentTime(t *testing.T) {
 }
 
 func TestCalculateViaExecute(t *testing.T) {
-	m := NewManager(t.TempDir(), []string{}, 0)
+	m := NewManager(t.TempDir(), []string{}, 0, "", false)
 	res, err := m.Execute("calc", `{"expression":"2+2*10"}`)
 	if err != nil {
 		t.Fatalf("calc: %v", err)
@@ -70,7 +70,7 @@ func TestCalculateViaExecute(t *testing.T) {
 
 func TestFileSystemActions(t *testing.T) {
 	root := t.TempDir()
-	tool := NewFileSystemTool(root)
+	tool := NewFileSystemTool(root, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	exec := func(args string) string {
@@ -126,7 +126,7 @@ func TestFileSystemActions(t *testing.T) {
 }
 
 func TestFileSystemEmptyDir(t *testing.T) {
-	tool := NewFileSystemTool(t.TempDir())
+	tool := NewFileSystemTool(t.TempDir(), false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 	res, err := tool.Execute(`{"action":"list","path":""}`)
 	if err != nil {
@@ -137,7 +137,7 @@ func TestFileSystemEmptyDir(t *testing.T) {
 }
 
 func TestFileSystemUnknownAction(t *testing.T) {
-	tool := NewFileSystemTool(t.TempDir())
+	tool := NewFileSystemTool(t.TempDir(), false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 	if _, err := tool.Execute(`{"action":"chmod","path":"x"}`); err == nil ||
 		!strings.Contains(err.Error(), "unknown action") {
@@ -148,7 +148,7 @@ func TestFileSystemUnknownAction(t *testing.T) {
 // --- process tool ---
 
 func TestProcessListProcesses(t *testing.T) {
-	tool := NewProcessTool(10*time.Second, []string{"go"})
+	tool := NewProcessTool(10*time.Second, []string{"go"}, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	res, err := tool.Execute(`{"action":"ps"}`)
@@ -161,7 +161,7 @@ func TestProcessListProcesses(t *testing.T) {
 }
 
 func TestProcessKillInvalidPID(t *testing.T) {
-	tool := NewProcessTool(5*time.Second, []string{"go"})
+	tool := NewProcessTool(5*time.Second, []string{"go"}, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	// PID 0 and negative are invalid; a huge PID does not exist.
@@ -171,7 +171,7 @@ func TestProcessKillInvalidPID(t *testing.T) {
 }
 
 func TestProcessUnknownAction(t *testing.T) {
-	tool := NewProcessTool(5*time.Second, []string{"go"})
+	tool := NewProcessTool(5*time.Second, []string{"go"}, false)
 	tool.SetPolicy(Policy{Mode: ConfirmAlways})
 
 	if _, err := tool.Execute(`{"action":"pause"}`); err == nil ||
@@ -262,7 +262,8 @@ func TestMockWeather(t *testing.T) {
 }
 
 func TestFetchWeatherEmptyLocation(t *testing.T) {
-	if _, err := FetchWeather(`{"location":""}`); err == nil {
+	tool := NewWeatherTool("")
+	if _, err := tool.Execute(`{"location":""}`); err == nil {
 		t.Fatal("expected error for empty location")
 	}
 }

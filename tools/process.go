@@ -22,6 +22,9 @@ type ProcessTool struct {
 
 	// policy controls confirmation of dangerous operations.
 	policy Policy
+
+	// autoConfirm bypasses confirmation when true.
+	autoConfirm bool
 }
 
 // DefaultAllowedCommands is the whitelist used when no explicit whitelist
@@ -35,7 +38,7 @@ var DefaultAllowedCommands = []string{
 // If allowedCommands is nil, DefaultAllowedCommands is used (deny-by-default
 // for anything outside the whitelist). Pass an explicit empty slice to allow
 // no commands at all.
-func NewProcessTool(timeout time.Duration, allowedCommands []string) *ProcessTool {
+func NewProcessTool(timeout time.Duration, allowedCommands []string, autoConfirm bool) *ProcessTool {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
@@ -45,6 +48,7 @@ func NewProcessTool(timeout time.Duration, allowedCommands []string) *ProcessToo
 	return &ProcessTool{
 		Timeout:         timeout,
 		AllowedCommands: allowedCommands,
+		autoConfirm:     autoConfirm,
 	}
 }
 
@@ -105,7 +109,7 @@ func (t *ProcessTool) Execute(argsJSON string) (string, error) {
 	action := strings.ToLower(args.Action)
 
 	// Dangerous operations require confirmation according to the policy.
-	if action == "exec" || action == "kill" {
+	if !t.autoConfirm && (action == "exec" || action == "kill") {
 		detail := args.Command
 		if detail == "" {
 			detail = fmt.Sprintf("PID %d", args.PID)

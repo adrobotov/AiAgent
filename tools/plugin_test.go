@@ -124,7 +124,7 @@ func TestLoadPluginBrokenCommand(t *testing.T) {
 func TestRegisterPluginsConflictProtection(t *testing.T) {
 	exe := buildTestPlugin(t)
 
-	m := NewManager(t.TempDir(), []string{}, 0)
+	m := NewManager(t.TempDir(), []string{}, 0, "", false)
 	var warnings []string
 	m.RegisterPlugins([]string{exe}, func(format string, args ...interface{}) {
 		warnings = append(warnings, fmt.Sprintf(format, args...))

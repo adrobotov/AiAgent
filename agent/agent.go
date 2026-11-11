@@ -61,7 +61,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		contextTokens = 8000
 	}
 
-	toolManager := tools.NewManager(cfg.Tools.Root, cfg.Tools.AllowedCommands, cfg.Tools.MaxResultSize)
+	toolManager := tools.NewManager(cfg.Tools.Root, cfg.Tools.AllowedCommands, cfg.Tools.MaxResultSize, cfg.Tools.WeatherAPIKey, cfg.Tools.AutoConfirm)
 	if len(cfg.Tools.Plugins) > 0 {
 		toolManager.RegisterPlugins(cfg.Tools.Plugins, func(format string, args ...interface{}) {
 			fmt.Fprintf(os.Stderr, "⚠️  "+format+"\n", args...)

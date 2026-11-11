@@ -75,8 +75,10 @@ type Manager struct {
 // NewManager creates a new ToolManager with built-in tools.
 // root restricts the filesystem tool (empty = current working directory),
 // allowedCommands is the process tool whitelist (nil = default safe list),
-// maxResultSize limits tool result size (0 = DefaultMaxResultSize).
-func NewManager(root string, allowedCommands []string, maxResultSize int) *Manager {
+// maxResultSize limits tool result size (0 = DefaultMaxResultSize),
+// weatherAPIKey is the WeatherAPI.com key (empty = mock data),
+// autoConfirm enables automatic confirmation for all tool operations.
+func NewManager(root string, allowedCommands []string, maxResultSize int, weatherAPIKey string, autoConfirm bool) *Manager {
 	if root == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			root = cwd
@@ -93,9 +95,9 @@ func NewManager(root string, allowedCommands []string, maxResultSize int) *Manag
 	m.Register(&EchoTool{})
 	m.Register(&CalcTool{})
 	m.Register(&TimeTool{})
-	m.Register(&WeatherTool{})
-	m.Register(NewFileSystemTool(root))
-	m.Register(NewProcessTool(30*time.Second, allowedCommands))
+	m.Register(NewWeatherTool(weatherAPIKey))
+	m.Register(NewFileSystemTool(root, autoConfirm))
+	m.Register(NewProcessTool(30*time.Second, allowedCommands, autoConfirm))
 	m.Register(NewWebSearchTool())
 	m.Register(NewCodeInterpreterTool())
 	m.Register(NewGitTool(""))
@@ -219,29 +221,6 @@ func (t *TimeTool) Parameters() map[string]interface{} {
 }
 func (t *TimeTool) Execute(argsJSON string) (string, error) {
 	return GetCurrentTime()
-}
-
-// WeatherTool fetches weather information (mock).
-type WeatherTool struct{}
-
-func (t *WeatherTool) Name() string { return "weather" }
-func (t *WeatherTool) Description() string {
-	return "Fetches weather information for a location (mock data)."
-}
-func (t *WeatherTool) Parameters() map[string]interface{} {
-	return map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"location": map[string]interface{}{
-				"type":        "string",
-				"description": "The city name to get weather for.",
-			},
-		},
-		"required": []string{"location"},
-	}
-}
-func (t *WeatherTool) Execute(argsJSON string) (string, error) {
-	return FetchWeather(argsJSON)
 }
 
 // --- Tool Implementations ---

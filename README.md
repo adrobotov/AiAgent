@@ -19,6 +19,8 @@
 - 👁️ **Vision** — анализ изображений (`/vision <path> <question>`)
 - 🌐 **Web Search** — поиск в интернете (DuckDuckGo)
 - 💻 **Code Interpreter** — выполнение Go кода
+- 🗄️ **Database** — выполнение SQL запросов к SQLite
+- 🐙 **Git** — операции с git (status, diff, log, commit, push и др.)
 
 ## Команды CLI
 

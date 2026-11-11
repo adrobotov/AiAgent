@@ -38,6 +38,11 @@ type repl struct {
 	store   *history.Store
 	convID  int64
 	scanner *bufio.Scanner
+
+	// suggestionMode is set when a partial command match is shown.
+	// It holds the list of matching commands for number-based selection.
+	suggestionMode bool
+	matches        []command
 }
 
 // commandTable returns the command table processed in order of definition.
@@ -50,7 +55,8 @@ func commandTable() []command {
 			help:    "/exit              - Exit the agent",
 			handler: func(r *repl, input string) bool {
 				fmt.Println("\nGoodbye!")
-				return true
+				os.Exit(0)
+				return false
 			},
 		},
 		{
@@ -74,6 +80,16 @@ func commandTable() []command {
 			pattern: regexp.MustCompile(`^/multi$`),
 			help:    "/multi             - Multi-line input mode (type /end on a new line to finish)",
 			handler: (*repl).handleMulti,
+		},
+		{
+			pattern: regexp.MustCompile(`^/calc(?:\s+(.+))?$`),
+			help:    "/calc [expr]       - Evaluate a math expression",
+			handler: (*repl).handleCalc,
+		},
+		{
+			pattern: regexp.MustCompile(`^/weather\s+(\S+)(?:\s+(.+))?$`),
+			help:    "/weather <loc>     - Get weather for a location",
+			handler: (*repl).handleWeather,
 		},
 		{
 			pattern: regexp.MustCompile(`^/conversations?$`),
@@ -335,9 +351,67 @@ func (r *repl) Run() {
 			continue
 		}
 
-		if r.dispatch(input) {
-			break
+		// If in suggestion mode, check if input is a number
+		if r.suggestionMode {
+			if num := trySelectMatch(input); num >= 0 && num < len(r.matches) {
+				// Echo the full command template for the user to complete
+				cmd := r.matches[num]
+				cmdName := extractCommandName(cmd.help)
+				fmt.Printf("%s ", cmdName)
+				// Read the rest of the command on the next line
+				if !r.scanner.Scan() {
+					break
+				}
+				rest := strings.TrimSpace(r.scanner.Text())
+				// Reconstruct full input and dispatch
+				fullInput := cmdName + rest
+				if r.dispatch(fullInput) {
+					continue
+				}
+				r.handleChat(fullInput)
+				continue
+			}
+			// Not a valid selection — exit suggestion mode
+			r.suggestionMode = false
+			r.matches = nil
 		}
+
+		// Show command list when user types just "/"
+		if input == "/" {
+			fmt.Println("\n📋 Available commands (enter number to select):")
+			for i, cmd := range commandTable() {
+				fmt.Printf("  [%d] %s\n", i+1, cmd.help)
+			}
+			fmt.Println()
+			// Enable suggestion mode for full command list
+			r.suggestionMode = true
+			r.matches = commandTable()
+			continue
+		}
+
+		// Try to dispatch as a command
+		if r.dispatch(input) {
+			// Command was recognized — don't send to agent
+			continue
+		}
+
+		// If input starts with "/" but wasn't recognized, check for partial matches
+		if strings.HasPrefix(input, "/") {
+			partial := strings.TrimPrefix(input, "/")
+			if matches := filterCommands(partial); len(matches) > 0 {
+				fmt.Println("\n📋 Matching commands (enter number to select):")
+				for i, cmd := range matches {
+					fmt.Printf("  [%d] %s\n", i+1, cmd.help)
+				}
+				fmt.Println()
+				r.suggestionMode = true
+				r.matches = matches
+				continue
+			}
+		}
+
+		// Not a recognized command — send to agent
+		r.handleChat(input)
 	}
 
 	if err := r.scanner.Err(); err != nil {
@@ -346,16 +420,54 @@ func (r *repl) Run() {
 	}
 }
 
+// trySelectMatch checks if input is a valid selection number.
+// Returns the index of the selected command, or -1 if not a valid selection.
+func trySelectMatch(input string) int {
+	num, err := strconv.Atoi(input)
+	if err != nil {
+		return -1
+	}
+	if num < 1 {
+		return -1
+	}
+	return num - 1
+}
+
 // dispatch matches input against the command table. Returns true when the
-// REPL must stop. Unrecognized input is sent to the agent as a chat message.
+// input was recognized as a command (even if the command itself returned false).
 func (r *repl) dispatch(input string) bool {
 	for _, cmd := range commandTable() {
 		if cmd.pattern.MatchString(input) {
-			return cmd.handler(r, input)
+			cmd.handler(r, input)
+			return true
 		}
 	}
-	r.handleChat(input)
 	return false
+}
+
+// filterCommands returns commands matching the partial text (prefix match).
+func filterCommands(partial string) []command {
+	var matches []command
+	partial = strings.ToLower(partial)
+	for _, cmd := range commandTable() {
+		cmdName := extractCommandName(cmd.help)
+		// Strip leading "/" for comparison
+		cmdName = strings.TrimPrefix(cmdName, "/")
+		if strings.HasPrefix(cmdName, partial) {
+			matches = append(matches, cmd)
+		}
+	}
+	return matches
+}
+
+// extractCommandName extracts the command name from help text
+// (e.g., "/weather <loc> - ..." → "/weather").
+func extractCommandName(help string) string {
+	parts := strings.Fields(help)
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return ""
 }
 
 // newConversation starts a fresh conversation and clears the agent context.
@@ -1038,6 +1150,51 @@ func (r *repl) handleMulti(_ string) bool {
 	return false
 }
 
+// handleCalc evaluates a math expression.
+func (r *repl) handleCalc(input string) bool {
+	pattern := regexp.MustCompile(`^/calc(?:\s+(.+))?$`)
+	matches := pattern.FindStringSubmatch(input)
+	expr := ""
+	if len(matches) >= 2 {
+		expr = strings.TrimSpace(matches[1])
+	}
+	if expr == "" {
+		fmt.Println("Usage: /calc [expression]")
+		fmt.Println("Example: /calc 2+2*2")
+		return false
+	}
+
+	result, err := tools.Calculate(fmt.Sprintf(`{"expression":%q}`, expr))
+	if err != nil {
+		fmt.Printf("❌ Error: %v\n", err)
+		return false
+	}
+
+	fmt.Printf("✅ %s = %s\n\n", expr, result)
+	return false
+}
+
+// handleWeather fetches weather for a location.
+func (r *repl) handleWeather(input string) bool {
+	pattern := regexp.MustCompile(`^/weather\s+(\S+)(?:\s+(.+))?$`)
+	matches := pattern.FindStringSubmatch(input)
+	if len(matches) < 2 {
+		fmt.Println("Usage: /weather <location>")
+		fmt.Println("Example: /weather Москва")
+		return false
+	}
+
+	location := matches[1]
+	result, err := tools.FetchWeather(fmt.Sprintf(`{"location":%q}`, location))
+	if err != nil {
+		fmt.Printf("❌ Error: %v\n", err)
+		return false
+	}
+
+	fmt.Printf("🌤  %s\n\n", result)
+	return false
+}
+
 // handlePipeline shows the multi-agent pipeline visualization.
 func (r *repl) handlePipeline(input string) bool {
 	// Parse the task from the input (e.g., /pipeline <task>)
@@ -1227,9 +1384,9 @@ func listConversations(store *history.Store) {
 }
 
 func printHelp() {
-	fmt.Println("\nCommands:")
-	for _, cmd := range commandTable() {
-		fmt.Println("  " + cmd.help)
+	fmt.Println("\n📋 Available commands (enter number to select):")
+	for i, cmd := range commandTable() {
+		fmt.Printf("  [%d] %s\n", i+1, cmd.help)
 	}
 	fmt.Println()
 }
