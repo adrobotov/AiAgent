@@ -109,11 +109,12 @@ func (t *FileSystemTool) Execute(argsJSON string) (string, error) {
 	action := strings.ToLower(args.Action)
 
 	// Dangerous operations require confirmation according to the policy.
-	if !t.autoConfirm && (action == "write" || action == "create" || action == "delete" || action == "move" || action == "append" || action == "insert" || action == "replace") {
+	if !t.autoConfirm && isDangerousAction(action) {
 		detail := path
-		if action == "write" || action == "create" || action == "append" || action == "insert" {
+		switch action {
+		case "write", "create", "append", "insert":
 			detail = fmt.Sprintf("%s (%d bytes)", path, len(args.Content))
-		} else if action == "replace" {
+		case "replace":
 			detail = fmt.Sprintf("%s (replace '%s' with '%s')", path, args.Search, args.Replace)
 		}
 		if !t.policy.approve(t.Name(), action, detail) {
@@ -402,7 +403,7 @@ func (t *FileSystemTool) appendFile(path string, content string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("failed to open file for appending: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.WriteString(content); err != nil {
 		return "", fmt.Errorf("failed to append content: %w", err)
@@ -543,4 +544,13 @@ func (t *FileSystemTool) searchFile(path, pattern string) (string, error) {
 		result += fmt.Sprintf("\n... and %d more matches", matchCount-50)
 	}
 	return result, nil
+}
+
+// isDangerousAction returns true for operations that modify files or directories.
+func isDangerousAction(action string) bool {
+	switch action {
+	case "write", "create", "delete", "move", "append", "insert", "replace":
+		return true
+	}
+	return false
 }

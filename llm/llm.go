@@ -85,7 +85,7 @@ func NewClient(cfg *config.LLMConfig) *Client {
 				ForceAttemptHTTP2: false,
 			},
 		},
-		config:     cfg,
+		config: cfg,
 	}
 
 	// Setup OAuth token manager for GigaChat
