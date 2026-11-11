@@ -61,11 +61,8 @@ release:
   header: |
     ## Release {{ .Tag }}
 
-    Full changelog: https://github.com/{{ .Env.GITHUB_OWNER }}/{{ .Env.GITHUB_REPO }}/compare/{{ .PreviousTag }}...{{ .Tag }}
-
   footer: |
     **Full Changelog**: https://github.com/{{ .Env.GITHUB_OWNER }}/{{ .Env.GITHUB_REPO }}/compare/{{ .PreviousTag }}...{{ .Tag }}
 
-  # Source archives
-  sources:
-    - .
+source:
+  enabled: true
