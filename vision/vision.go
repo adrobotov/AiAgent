@@ -20,7 +20,7 @@ func LoadImage(path string) (*Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open image: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	data, err := io.ReadAll(file)
 	if err != nil {

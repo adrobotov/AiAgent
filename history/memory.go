@@ -71,7 +71,7 @@ func (s *Store) SearchMemories(query []float32, limit int) ([]Memory, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var scored []Memory
 	for rows.Next() {
@@ -124,7 +124,7 @@ func (s *Store) ListMemories(limit int) ([]Memory, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []Memory
 	for rows.Next() {
@@ -188,8 +188,7 @@ func (s *Store) GarbageCollect(maxAge, minAge time.Duration, minAccess, maxMemor
 
 	// 3. If total still exceeds maxMemories, remove least accessed beyond top-K
 	var current int
-	s.db.QueryRow("SELECT COUNT(*) FROM memories").Scan(&current)
-	if current > maxMemories {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM memories").Scan(&current); err == nil && current > maxMemories {
 		// Keep the top-K most accessed, remove the rest
 		removeCount := current - maxMemories
 		if removeCount > 0 {
@@ -206,7 +205,7 @@ func (s *Store) GarbageCollect(maxAge, minAge time.Duration, minAccess, maxMemor
 						ids = append(ids, id)
 					}
 				}
-				rows.Close()
+				_ = rows.Close()
 
 				for _, id := range ids {
 					_, err := s.db.Exec("DELETE FROM memories WHERE id = ?", id)
@@ -228,7 +227,8 @@ func (s *Store) DeleteMemories() error {
 	if err != nil {
 		return err
 	}
-	s.db.Exec("DELETE FROM sqlite_sequence WHERE name='memories'")
+	// Reset autoincrement (best-effort).
+	_, _ = s.db.Exec("DELETE FROM sqlite_sequence WHERE name='memories'")
 	return nil
 }
 

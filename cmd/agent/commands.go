@@ -151,7 +151,10 @@ func commandTable() []command {
 					fmt.Printf("Conversation %d not found.\n", id)
 					return false
 				}
-				r.store.RenameConversation(id, newName)
+				if err := r.store.RenameConversation(id, newName); err != nil {
+					fmt.Printf("Error renaming conversation: %v\n", err)
+					return false
+				}
 				fmt.Printf("\n✓ Conversation renamed to '%s'\n\n", newName)
 				return false
 			},
@@ -182,7 +185,10 @@ func commandTable() []command {
 					fmt.Printf("Conversation %d not found.\n", id)
 					return false
 				}
-				r.store.DeleteConversation(id)
+				if err := r.store.DeleteConversation(id); err != nil {
+					fmt.Printf("Error deleting conversation: %v\n", err)
+					return false
+				}
 				fmt.Printf("\n✓ Conversation %d deleted\n\n", id)
 				return false
 			},
@@ -343,8 +349,8 @@ func (r *repl) dispatch(input string) bool {
 // newConversation starts a fresh conversation and clears the agent context.
 func (r *repl) newConversation(name string) {
 	if r.store != nil {
-		convID, _ := r.store.NewConversation()
-		if name != "" {
+		convID, err := r.store.NewConversation()
+		if err == nil && name != "" {
 			r.store.RenameConversation(convID, name)
 		}
 		r.store.SetCurrentConversation(convID)
@@ -379,7 +385,7 @@ func (r *repl) saveMessage(role, content string) {
 	if r.store == nil || r.convID <= 0 {
 		return
 	}
-	r.store.SaveMessage(r.convID, history.Message{
+	_ = r.store.SaveMessage(r.convID, history.Message{
 		Role:    role,
 		Content: content,
 	})

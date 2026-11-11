@@ -134,7 +134,7 @@ func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -193,7 +193,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, functions []Funct
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -267,7 +267,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -335,7 +335,7 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -343,7 +343,7 @@ func (c *Client) Stream(ctx context.Context, messages []Message, functions []Fun
 
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)

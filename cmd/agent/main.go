@@ -50,7 +50,7 @@ func main() {
 		store = nil
 	}
 	if store != nil {
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 	}
 
 	ag, err := agent.New(cfg)

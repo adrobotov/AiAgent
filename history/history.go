@@ -157,7 +157,7 @@ func (s *Store) GetMessages(convID int64, limit int) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var messages []Message
 	for rows.Next() {
@@ -178,7 +178,7 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var conversations []Conversation
 	for rows.Next() {
@@ -236,9 +236,9 @@ func (s *Store) DeleteAllConversations() error {
 	if err != nil {
 		return err
 	}
-	// Reset autoincrement
-	s.db.Exec("DELETE FROM sqlite_sequence WHERE name='conversations'")
-	s.db.Exec("DELETE FROM sqlite_sequence WHERE name='messages'")
+	// Reset autoincrement (best-effort).
+	_, _ = s.db.Exec("DELETE FROM sqlite_sequence WHERE name='conversations'")
+	_, _ = s.db.Exec("DELETE FROM sqlite_sequence WHERE name='messages'")
 	return nil
 }
 

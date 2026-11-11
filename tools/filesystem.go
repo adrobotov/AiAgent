@@ -131,8 +131,7 @@ func (t *FileSystemTool) Execute(argsJSON string) (string, error) {
 	}
 }
 
-// resolvePath resolves and validates a path, checking root restriction
-// and resolving symlinks to prevent path traversal attacks.
+// resolvePath resolves and validates a path, checking root restriction.
 // An empty path refers to the root directory when a root is configured.
 func (t *FileSystemTool) resolvePath(path string) (string, error) {
 	if path == "" {
@@ -153,12 +152,6 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 			return "", fmt.Errorf("invalid root path: %w", err)
 		}
 
-		// Resolve symlinks in the root to prevent symlink-based escapes
-		realRoot, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			realRoot = root
-		}
-
 		var resolved string
 		if filepath.IsAbs(path) {
 			// Absolute path: check if it's within root
@@ -168,8 +161,9 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 			resolved = filepath.Clean(filepath.Join(root, path))
 		}
 
-		// Ensure the resolved path is within the root
-		rel, err := filepath.Rel(realRoot, resolved)
+		// Ensure the resolved path is within the root.
+		// Use filepath.Rel which returns ".." prefix for paths outside root.
+		rel, err := filepath.Rel(root, resolved)
 		if err != nil {
 			return "", fmt.Errorf("path outside root directory")
 		}

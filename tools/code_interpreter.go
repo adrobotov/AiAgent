@@ -89,7 +89,7 @@ func main() {
 	if err != nil {
 		return "", fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	srcPath := filepath.Join(tmpDir, "main.go")
 	binPath := filepath.Join(tmpDir, "main.bin")

@@ -208,7 +208,7 @@ func writeSSE(w http.ResponseWriter, v interface{}) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
 // writeSSEError writes an SSE error event.
