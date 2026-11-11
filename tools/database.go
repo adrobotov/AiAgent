@@ -123,7 +123,7 @@ func (t *DatabaseTool) executeQuery(sql string, limit int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Set query timeout
 	_, _ = db.Exec("PRAGMA busy_timeout = 5000")
@@ -138,7 +138,7 @@ func (t *DatabaseTool) executeQuery(sql string, limit int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("query failed: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {
@@ -147,7 +147,7 @@ func (t *DatabaseTool) executeQuery(sql string, limit int) (string, error) {
 
 	if len(columns) == 0 {
 		// Non-SELECT query (INSERT, UPDATE, DELETE)
-		return fmt.Sprintf("Query executed successfully (no rows returned)"), nil
+		return "Query executed successfully (no rows returned)", nil
 	}
 
 	var results []map[string]interface{}
@@ -198,7 +198,7 @@ func (t *DatabaseTool) listTables(dbPath, tableName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var sql string
 	if tableName != "" {
@@ -216,7 +216,7 @@ func (t *DatabaseTool) describeTable(dbPath, tableName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sql := fmt.Sprintf("PRAGMA table_info('%s')", tableName)
 	return t.executeQuery(sql, 100)
