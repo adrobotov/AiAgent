@@ -481,7 +481,7 @@ func (r *repl) restoreSession() bool {
 func (r *repl) handleChat(input string) {
 	r.saveMessage("user", input)
 
-	fmt.Print("Agent: ")
+	fmt.Println("Agent: \U0001f914")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -489,9 +489,9 @@ func (r *repl) handleChat(input string) {
 	go func() {
 		response, err := r.ag.Process(ctx, input)
 		if err != nil {
-			fmt.Printf("\r   \n❌ Error: %v\n\n", err)
+			fmt.Printf("❌ Error: %v\n\n", err)
 		} else {
-			fmt.Println("\r   \n" + r.ag.Renderer().Render(response) + "\n")
+			fmt.Println(r.ag.Renderer().Render(response) + "\n")
 			r.saveMessage("assistant", response)
 		}
 		cancel()
@@ -506,7 +506,7 @@ func (r *repl) handleChat(input string) {
 		select {
 		case <-ticker.C:
 			dots = (dots + 1) % 4
-			fmt.Printf("\r%s", strings.Repeat(".", dots))
+			fmt.Printf("\r\033[KAgent: %s", strings.Repeat(".", dots))
 		case <-ctx.Done():
 			ticker.Stop()
 			return
