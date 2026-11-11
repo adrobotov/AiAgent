@@ -225,7 +225,7 @@ func geocode(location string) (lat, lon float64, name string, err error) {
 	if err != nil {
 		return 0, 0, "", fmt.Errorf("geocoding request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return 0, 0, "", fmt.Errorf("geocoding API status %d", resp.StatusCode)

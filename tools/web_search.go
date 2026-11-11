@@ -142,7 +142,7 @@ func (t *WebSearchTool) search(query string, maxResults int) ([]SearchResult, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DuckDuckGo returned status %d", resp.StatusCode)

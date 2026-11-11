@@ -201,13 +201,13 @@ func TestFileReadSizeLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Write 65 MB.
-	n, err := f.Write(make([]byte, MaxReadFileSize+1024))
-	f.Close()
+	_, err = f.Write(make([]byte, MaxReadFileSize+1024))
 	if err != nil {
+		f.Close()
 		t.Fatal(err)
 	}
-	if n != int(MaxReadFileSize+1024) {
-		t.Fatalf("wrote %d bytes, expected %d", n, MaxReadFileSize+1024)
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	_, err = tool.Execute(fmt.Sprintf(`{"action":"read","path":%q}`, "large.bin"))

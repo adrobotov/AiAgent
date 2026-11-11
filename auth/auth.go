@@ -133,7 +133,7 @@ func (tm *TokenManager) refreshToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("auth request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read response body for error handling
 	respBody, _ := io.ReadAll(resp.Body)

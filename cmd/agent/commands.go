@@ -351,7 +351,7 @@ func (r *repl) newConversation(name string) {
 	if r.store != nil {
 		convID, err := r.store.NewConversation()
 		if err == nil && name != "" {
-			r.store.RenameConversation(convID, name)
+			_ = r.store.RenameConversation(convID, name)
 		}
 		r.store.SetCurrentConversation(convID)
 		r.convID = convID
