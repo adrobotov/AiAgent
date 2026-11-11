@@ -84,7 +84,7 @@ func fetchLiveWeather(location string) (string, error) {
 	}
 
 	fcURL := fmt.Sprintf(
-		"%s?latitude=%f&longitude=%f&daily=temperature_2m_max,temperature_2m_min,weathercode_max&timezone=auto",
+		"%s?latitude=%f&longitude=%f&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m&timezone=auto",
 		forecastBaseURL,
 		lat,
 		lon,

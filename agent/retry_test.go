@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"agent/config"
 	"agent/llm"
@@ -25,7 +27,7 @@ func retryAgent(t *testing.T, handler http.HandlerFunc) *Agent {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ag.retryDelay = 0 // no waiting between retries
+	ag.retryMinDelay = 0 // no waiting between retries
 	return ag
 }
 
@@ -80,10 +82,54 @@ func TestChatWithRetryGivesUp(t *testing.T) {
 	ag.retryCount = 2
 
 	_, err := ag.chatWithRetry(context.Background(), []llm.Message{{Role: "user", Content: "hi"}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "failed after 2 attempts") {
+	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
 		t.Fatalf("expected give-up error, got %v", err)
 	}
 	if calls.Load() != 3 { // initial + 2 retries
 		t.Fatalf("expected 3 calls, got %d", calls.Load())
+	}
+}
+
+// TestBackoffCalculatesIncreasingDelay verifies exponential backoff grows.
+func TestBackoffCalculatesIncreasingDelay(t *testing.T) {
+	ag := &Agent{
+		retryMinDelay:   100 * time.Millisecond,
+		retryMaxDelay:   30 * time.Second,
+		retryBackoffMul: 2.0,
+	}
+
+	d1 := ag.computeBackoff(1)
+	d2 := ag.computeBackoff(2)
+	d3 := ag.computeBackoff(3)
+
+	// With jitter, exact values are unpredictable, but the order must hold.
+	if d2 <= d1 {
+		t.Errorf("backoff should increase: d1=%v d2=%v", d1, d2)
+	}
+	if d3 <= d2 {
+		t.Errorf("backoff should increase: d2=%v d3=%v", d2, d3)
+	}
+}
+
+// TestNonRetryableErrors verifies which errors are not retried.
+func TestNonRetryableErrors(t *testing.T) {
+	cases := []struct {
+		err   string
+		retry bool
+	}{
+		{"API error (status 401): unauthorized", false},
+		{"API error (status 403): forbidden", false},
+		{"API error (status 422): bad request", false},
+		{"API error (status 400): invalid param", false},
+		{"API error (status 500): internal error", true},
+		{"API error (status 502): bad gateway", true},
+		{"context deadline exceeded", true},
+	}
+	for _, tc := range cases {
+		err := errors.New(tc.err)
+		got := isNonRetryableError(err)
+		if got != !tc.retry {
+			t.Errorf("isNonRetryableError(%q) = %v, want %v", tc.err, got, !tc.retry)
+		}
 	}
 }

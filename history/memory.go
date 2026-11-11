@@ -10,26 +10,35 @@ import (
 
 // Memory represents a long-term memory entry with its embedding.
 type Memory struct {
-	ID        int64
-	Text      string
-	CreatedAt time.Time
-	Score     float64 // similarity score (filled by SearchMemories)
+	ID          int64
+	Text        string
+	CreatedAt   time.Time
+	AccessedAt  time.Time
+	AccessCount int
+	Score       float64 // similarity score (filled by SearchMemories)
 }
 
-// initMemoryDB creates the memories table.
+// initMemoryDB creates the memories table and runs migrations.
 func (s *Store) initMemoryDB() error {
 	query := `
 	CREATE TABLE IF NOT EXISTS memories (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		text TEXT NOT NULL,
 		embedding BLOB,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		access_count INTEGER DEFAULT 0
 	);
 	`
 	_, err := s.db.Exec(query)
 	if err != nil {
 		return fmt.Errorf("create memories table: %w", err)
 	}
+
+	// Migration: add new columns if they don't exist (ignore errors for existing columns).
+	_, _ = s.db.Exec("ALTER TABLE memories ADD COLUMN accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+	_, _ = s.db.Exec("ALTER TABLE memories ADD COLUMN access_count INTEGER DEFAULT 0")
+
 	return nil
 }
 
@@ -42,7 +51,7 @@ func (s *Store) SaveMemory(text string, embedding []float32) error {
 		blob = encodeEmbedding(embedding)
 	}
 	_, err := s.db.Exec(
-		"INSERT INTO memories (text, embedding) VALUES (?, ?)",
+		"INSERT INTO memories (text, embedding, created_at, accessed_at, access_count) VALUES (?, ?, datetime('now'), datetime('now'), 0)",
 		text, blob,
 	)
 	return err
@@ -50,14 +59,14 @@ func (s *Store) SaveMemory(text string, embedding []float32) error {
 
 // SearchMemories returns the most similar memories to the query embedding,
 // ordered by cosine similarity (descending). Only memories with embeddings
-// are considered.
+// are considered. Access count is incremented for returned memories.
 func (s *Store) SearchMemories(query []float32, limit int) ([]Memory, error) {
 	if len(query) == 0 || limit <= 0 {
 		return nil, nil
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id, text, embedding, created_at FROM memories WHERE embedding IS NOT NULL",
+		"SELECT id, text, embedding, created_at, accessed_at, access_count FROM memories WHERE embedding IS NOT NULL",
 	)
 	if err != nil {
 		return nil, err
@@ -68,13 +77,16 @@ func (s *Store) SearchMemories(query []float32, limit int) ([]Memory, error) {
 	for rows.Next() {
 		var m Memory
 		var blob []byte
-		var createdAt string
-		if err := rows.Scan(&m.ID, &m.Text, &blob, &createdAt); err != nil {
+		var createdAt, accessedAt string
+		var accessCount int
+		if err := rows.Scan(&m.ID, &m.Text, &blob, &createdAt, &accessedAt, &accessCount); err != nil {
 			return nil, err
 		}
 		if m.CreatedAt, err = parseDBTime(createdAt); err != nil {
 			return nil, err
 		}
+		m.AccessedAt, _ = parseDBTime(accessedAt)
+		m.AccessCount = accessCount
 
 		vec := decodeEmbedding(blob)
 		m.Score = cosineSimilarity(query, vec)
@@ -91,13 +103,22 @@ func (s *Store) SearchMemories(query []float32, limit int) ([]Memory, error) {
 	if len(scored) > limit {
 		scored = scored[:limit]
 	}
+
+	// Increment access count for returned memories
+	for _, m := range scored {
+		_, _ = s.db.Exec(
+			"UPDATE memories SET access_count = access_count + 1, accessed_at = datetime('now') WHERE id = ?",
+			m.ID,
+		)
+	}
+
 	return scored, nil
 }
 
 // ListMemories returns recent memories ordered by creation date (newest first).
 func (s *Store) ListMemories(limit int) ([]Memory, error) {
 	rows, err := s.db.Query(
-		"SELECT id, text, NULL, created_at FROM memories ORDER BY id DESC LIMIT ?",
+		"SELECT id, text, NULL, created_at, accessed_at, access_count FROM memories ORDER BY id DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -108,17 +129,97 @@ func (s *Store) ListMemories(limit int) ([]Memory, error) {
 	var result []Memory
 	for rows.Next() {
 		var m Memory
-		var createdAt string
+		var createdAt, accessedAt string
+		var accessCount int
 		var blob []byte
-		if err := rows.Scan(&m.ID, &m.Text, &blob, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Text, &blob, &createdAt, &accessedAt, &accessCount); err != nil {
 			return nil, err
 		}
 		if m.CreatedAt, err = parseDBTime(createdAt); err != nil {
 			return nil, err
 		}
+		m.AccessedAt, _ = parseDBTime(accessedAt)
+		m.AccessCount = accessCount
 		result = append(result, m)
 	}
 	return result, rows.Err()
+}
+
+// GarbageCollect removes old, low-priority memories to free space.
+// Criteria:
+//   - Memories older than maxAge with zero accesses are removed.
+//   - Memories with access_count below minAccess and older than minAge are removed.
+//   - If total count exceeds maxMemories, the least recently accessed memories
+//     beyond the top-K most accessed are removed.
+//
+// Returns the number of memories deleted.
+func (s *Store) GarbageCollect(maxAge, minAge time.Duration, minAccess, maxMemories int) (int, error) {
+	var total int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM memories").Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+
+	deleted := 0
+
+	// 1. Remove memories older than maxAge with zero accesses
+	cutoff := time.Now().Add(-maxAge).Format("2006-01-02 15:04:05")
+	res, err := s.db.Exec(
+		"DELETE FROM memories WHERE created_at < ? AND access_count = 0",
+		cutoff,
+	)
+	if err == nil {
+		n, _ := res.RowsAffected()
+		deleted += int(n)
+	}
+
+	// 2. Remove memories older than minAge with access_count below minAccess
+	if minAccess > 0 {
+		cutoff2 := time.Now().Add(-minAge).Format("2006-01-02 15:04:05")
+		res, err := s.db.Exec(
+			"DELETE FROM memories WHERE created_at < ? AND access_count < ?",
+			cutoff2, minAccess,
+		)
+		if err == nil {
+			n, _ := res.RowsAffected()
+			deleted += int(n)
+		}
+	}
+
+	// 3. If total still exceeds maxMemories, remove least accessed beyond top-K
+	var current int
+	s.db.QueryRow("SELECT COUNT(*) FROM memories").Scan(&current)
+	if current > maxMemories {
+		// Keep the top-K most accessed, remove the rest
+		removeCount := current - maxMemories
+		if removeCount > 0 {
+			// Fetch IDs of memories to delete (least accessed first)
+			rows, err := s.db.Query(
+				"SELECT id FROM memories ORDER BY access_count ASC, accessed_at ASC LIMIT ?",
+				removeCount,
+			)
+			if err == nil {
+				var ids []int64
+				for rows.Next() {
+					var id int64
+					if err := rows.Scan(&id); err == nil {
+						ids = append(ids, id)
+					}
+				}
+				rows.Close()
+
+				for _, id := range ids {
+					_, err := s.db.Exec("DELETE FROM memories WHERE id = ?", id)
+					if err != nil {
+						break
+					}
+					deleted++
+				}
+			}
+		}
+	}
+
+	return deleted, nil
 }
 
 // DeleteMemories removes all long-term memories.

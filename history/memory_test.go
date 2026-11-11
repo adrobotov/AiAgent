@@ -120,3 +120,79 @@ func TestEmbeddingEncoding(t *testing.T) {
 		t.Error("invalid blob length must return nil")
 	}
 }
+
+func TestMemoryAccessTracking(t *testing.T) {
+	store, err := NewWithPath(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	defer store.Close()
+
+	_ = store.SaveMemory("frequent", []float32{1, 0, 0})
+	_ = store.SaveMemory("rare", []float32{0, 1, 0})
+
+	// Search multiple times with limit=1 — only "frequent" is returned.
+	for i := 0; i < 5; i++ {
+		_, err := store.SearchMemories([]float32{1, 0, 0}, 1)
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+	}
+
+	memories, err := store.ListMemories(10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	freq := findMemory(memories, "frequent")
+	rare := findMemory(memories, "rare")
+	if freq == nil || rare == nil {
+		t.Fatalf("memories not found: freq=%v rare=%v", freq, rare)
+	}
+	if freq.AccessCount < 5 {
+		t.Errorf("frequent.AccessCount = %d, want >= 5", freq.AccessCount)
+	}
+	if rare.AccessCount != 0 {
+		t.Errorf("rare.AccessCount = %d, want 0", rare.AccessCount)
+	}
+}
+
+func TestGarbageCollect(t *testing.T) {
+	store, err := NewWithPath(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	defer store.Close()
+
+	// Insert 10 memories with increasing access counts.
+	for i := 0; i < 10; i++ {
+		_ = store.SaveMemory("memory-"+string(rune('0'+i)), []float32{float32(i), 0, 0})
+		// Increment access count for some memories to create differentiation.
+		if i >= 5 {
+			_, _ = store.db.Exec("UPDATE memories SET access_count = ? WHERE text = ?", i, "memory-"+string(rune('0'+i)))
+		}
+	}
+
+	// GC with maxMemories=5 should remove 5 least accessed (IDs 1-5).
+	deleted, err := store.GarbageCollect(0, 0, 0, 5)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if deleted != 5 {
+		t.Errorf("deleted = %d, want 5", deleted)
+	}
+
+	var total int
+	store.db.QueryRow("SELECT COUNT(*) FROM memories").Scan(&total)
+	if total != 5 {
+		t.Errorf("remaining = %d, want 5", total)
+	}
+}
+
+func findMemory(memories []Memory, text string) *Memory {
+	for i := range memories {
+		if memories[i].Text == text {
+			return &memories[i]
+		}
+	}
+	return nil
+}

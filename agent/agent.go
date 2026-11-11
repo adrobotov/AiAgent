@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -25,8 +27,6 @@ type Agent struct {
 	maxTurns   int
 	maxHistory int
 	renderer   *markdown.Renderer
-	retryCount int
-	retryDelay time.Duration
 
 	// Context management
 	contextTokens int  // approx. token budget for session history
@@ -38,6 +38,12 @@ type Agent struct {
 	// Token usage tracking
 	usageMu sync.Mutex
 	usage   llm.Usage
+
+	// Retry / backoff configuration
+	retryCount      int           // max retry attempts
+	retryMinDelay   time.Duration // initial backoff delay
+	retryMaxDelay   time.Duration // maximum backoff delay
+	retryBackoffMul float64       // multiplier for exponential backoff
 }
 
 // New creates a new Agent instance.
@@ -63,16 +69,18 @@ func New(cfg *config.Config) (*Agent, error) {
 	}
 
 	return &Agent{
-		client:        llm.NewClient(&cfg.LLM),
-		config:        cfg,
-		tools:         toolManager,
-		maxTurns:      maxTurns,
-		maxHistory:    maxHistory,
-		contextTokens: contextTokens,
-		summarize:     cfg.Agent.Summarize,
-		renderer:      markdown.New(true),
-		retryCount:    3,
-		retryDelay:    2 * time.Second,
+		client:          llm.NewClient(&cfg.LLM),
+		config:          cfg,
+		tools:           toolManager,
+		maxTurns:        maxTurns,
+		maxHistory:      maxHistory,
+		contextTokens:   contextTokens,
+		summarize:       cfg.Agent.Summarize,
+		renderer:        markdown.New(true),
+		retryCount:      3,
+		retryMinDelay:   500 * time.Millisecond,
+		retryMaxDelay:   30 * time.Second,
+		retryBackoffMul: 2.0,
 	}, nil
 }
 
@@ -424,14 +432,16 @@ func normalizeArguments(args interface{}) string {
 	}
 }
 
-// chatWithRetry sends a chat request with retry logic.
+// chatWithRetry sends a chat request with exponential backoff retry logic.
+// Non-retryable errors (auth, validation) are returned immediately.
 func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, functions []llm.FunctionDefinition) (*llm.Response, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= a.retryCount; attempt++ {
 		if attempt > 0 {
+			delay := a.computeBackoff(attempt)
 			select {
-			case <-time.After(a.retryDelay):
+			case <-time.After(delay):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -444,13 +454,44 @@ func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, funct
 
 		lastErr = err
 
-		// Don't retry on certain errors
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "422") {
+		// Don't retry on client errors (auth, validation, bad requests).
+		if isNonRetryableError(err) {
 			return nil, err
 		}
 	}
 
-	return nil, fmt.Errorf("failed after %d attempts: %w", a.retryCount, lastErr)
+	return nil, fmt.Errorf("failed after %d attempts: %w", a.retryCount+1, lastErr)
+}
+
+// isNonRetryableError returns true for errors that should not be retried.
+func isNonRetryableError(err error) bool {
+	errStr := err.Error()
+	// HTTP client errors that won't be resolved by retrying
+	if strings.Contains(errStr, "401") ||
+		strings.Contains(errStr, "403") ||
+		strings.Contains(errStr, "422") ||
+		strings.Contains(errStr, "400") {
+		return true
+	}
+	return false
+}
+
+// computeBackoff calculates the delay for a given retry attempt using
+// exponential backoff with random jitter (full mode).
+func (a *Agent) computeBackoff(attempt int) time.Duration {
+	// Exponential: minDelay * backoffMul^attempt
+	delay := float64(a.retryMinDelay) * math.Pow(a.retryBackoffMul, float64(attempt))
+
+	// Cap at maxDelay
+	if delay > float64(a.retryMaxDelay) {
+		delay = float64(a.retryMaxDelay)
+	}
+
+	// Add jitter: random value in [0.5, 1.0] of the calculated delay
+	jitter := 0.5 + rand.Float64()*0.5
+	delay *= jitter
+
+	return time.Duration(delay)
 }
 
 // History returns the conversation history.

@@ -133,6 +133,11 @@ func (t *ProcessTool) execCommand(cmdStr, argsStr string) (string, error) {
 		return "", fmt.Errorf("command is required")
 	}
 
+	// Check for command injection patterns
+	if containsInjectionPatterns(cmdStr) {
+		return "", fmt.Errorf("command rejected: potentially dangerous pattern detected")
+	}
+
 	// Check allowed commands: deny-by-default when the whitelist is empty.
 	if len(t.AllowedCommands) == 0 {
 		return "", fmt.Errorf("no commands are allowed (allowed_commands is empty)")
@@ -154,6 +159,10 @@ func (t *ProcessTool) execCommand(cmdStr, argsStr string) (string, error) {
 	var fullArgs []string
 
 	if argsStr != "" {
+		// Validate args don't contain injection patterns
+		if containsInjectionPatterns(argsStr) {
+			return "", fmt.Errorf("arguments rejected: potentially dangerous pattern detected")
+		}
 		fullCmd = cmdStr
 		fullArgs = splitArgs(argsStr)
 	} else {
@@ -259,6 +268,18 @@ func extractCommand(cmdStr string) string {
 		return parts[2]
 	}
 	return parts[0]
+}
+
+// containsInjectionPatterns checks for common command injection patterns.
+func containsInjectionPatterns(s string) bool {
+	// Dangerous shell operators that should not appear in user input
+	dangerous := []string{";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "\r"}
+	for _, d := range dangerous {
+		if strings.Contains(s, d) {
+			return true
+		}
+	}
+	return false
 }
 
 // splitArgs splits a command line into command and arguments.
